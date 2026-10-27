@@ -46,7 +46,7 @@ These go in the `[epd]` section of [firmware/platformio.ini](firmware/platformio
 | `EPD_FRAME_RATE` | `0` | Panel frame rate in Hz: 12 (12.5), 25, 50, 65, 75, 85, 100 or 120. The nearest supported rate is used. `0` uses the vendor default. |
 | `EPD_TEMPERATURE` | `93` | Temperature in °C forced on the controller, which uses it to choose a waveform. 93 selects the fastest one. Lower values are slower but give more contrast. |
 | `EPD_ROTATION` | `0` | Rotation at boot, in 90° steps clockwise: `0`, `1`, `2`, or `-1` for 270°. The `rot=N` serial command changes it until the next reset. |
-| `ITEMS_PER_PAGE` | `4` | List items per page at boot, 1–4. The `per_page=N` serial command changes it until the next reset. Cards share the space below the header evenly: 27, 37, 57 or 117 px tall. The text rows spread out and the usage bar thickens (2, 2, 4, 8 px), but the font stays the same size. |
+| `ITEMS_PER_PAGE` | `4` | List items per page at boot, 1–4. The `per_page=N` serial command changes it until the next reset. Cards share the space below the header evenly, and their contents scale with them (see [Card sizes](#card-sizes)). |
 | `EPD_ABORT_MS` | `0` | Cuts partial refreshes short after this many ms, for faster but less clean updates. `0` = off. Full refreshes always finish. |
 | `EPD_PAGE_HEIGHT` | `38` on STM32, `152` elsewhere | Rows drawn per pass. 152 = whole frame (5.8 KB buffer). 38 = 4 passes (1.4 KB). The board has only been tested with `152`. |
 | `EPD_SPI_HZ` | `10000000` | SPI clock. 4 MHz hung the Blue Pill on its first command after reset, so leave this at 10 MHz unless you have a reason to change it. |
@@ -56,6 +56,19 @@ These go in the `[epd]` section of [firmware/platformio.ini](firmware/platformio
 | `VALUE_UNIT` | `"GB"` | Unit added after disk and RAM values. Write it as `-DVALUE_UNIT=\"GB\"`. `\"\"` = none. |
 | `EPD_DEBUG` | off | Prints boot and render progress, a busy heartbeat and each refresh's duration on Serial. |
 | `BUTTON_PIN`, `LED_PIN`, `LED_ON_LEVEL`, `SERIAL_BAUD` | per board | Board I/O. `-1` disables the button or the LED. |
+
+### Card sizes
+
+| Per page | Card height | Layout | Text and icons | Bar |
+|---|---|---|---|---|
+| 4 | 27 px | name and IP on the left, disk and RAM on the right | 1x | 2 px |
+| 3 | 37 px | same grid, more spacing | 1x | 2 px |
+| 2 | 57 px | name, then IP, each across the card; disk and RAM side by side below | 2x name and IP, 1x disk and RAM | 4 px |
+| 1 | 117 px | one field per row | 3x name, 2x the rest | 8 px |
+
+The screen is only 152 px wide, so the two-column grid can't hold 2x text: a 2x IP address alone needs up to 160 px. Bigger text therefore needs fewer columns. At 3 per page there isn't room for two 2x rows, so the text stays 1x.
+
+When a value is too wide for its scale, it drops to the next smaller scale and stays vertically centered in its row. For example, `192.168.100.200` is drawn at 1x on a 2x row, and a long name at 2x on the 3x row. For disk and RAM, the unit is shortened first (`GB` → `G`), and the scale drops only if that doesn't help.
 
 ## Serial protocol
 

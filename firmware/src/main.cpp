@@ -126,43 +126,39 @@ static const uint32_t BUTTON_DEBOUNCE_MS = 30;
 
 // ---------------------------------------------------------------- layout (152x152)
 // slot 0 is the header (30 rows), slots 1..per page the cards, which split the rows down to the
-// page indicator evenly (30, 40, 60 or 120 rows); every slot ends in a 3 row gap
+// page indicator evenly (30, 40, 60 or 120 rows); every slot ends in a 3 row gap. Text, icons and
+// the bar scale with the card, see CARD_LAYOUTS
 static const uint8_t MAX_PER_PAGE = 4;
 static const int16_t SCREEN_W = 152;
 static const int16_t HEADER_H = 30;
 static const int16_t CARD_X = 1, CARD_W = 150, CARD_R = 3;
-static const int16_t TEXT_X = 3, TEXT_W = 81;   // name / ip column, 3..83
-static const int16_t ICON_X = 85;               // 12 px icons, 85..96
-static const int16_t VALUE_X = 98, VALUE_W = 51; // 98..148
 static const int16_t INDICATOR_Y = 148, INDICATOR_H = 2;
 
-// vertical layout within a slot: two 8 px text rows and the usage bar below them
-struct RowLayout { int16_t row1, row2, barY, barH; };
-static const RowLayout HEADER_LAYOUT = { 3, 13, 23, 2 };
+// one field's box: x absolute, y relative to the slot top, row height 8 * scale (the built-in 6x8
+// font and the icons are drawn at that integer scale; text that doesn't fit drops to a smaller one)
+struct Cell { int16_t x, y, w; uint8_t scale; };
+enum : uint8_t { F_NAME, F_IP, F_DISK, F_RAM, F_COUNT }; // also the bit index of their stale section
+struct SlotLayout { int16_t slotH, h; Cell cells[F_COUNT]; int16_t barY, barH; };
 
-struct CardLayout { int16_t slotH, h; RowLayout rows; };
-
-// the bar thickens with the card (2, 2, 4, 8 px) and sits 2 rows above its bottom edge; the rows
-// above the bar split into top margin, row gap and bottom margin (3, 2, 2 at 4 per page)
-static CardLayout cardLayout(uint8_t perPage)
-{
-  CardLayout c;
-  c.slotH = ((SCREEN_W - HEADER_H - 2) / perPage) & ~1;
-  c.h = c.slotH - 3;
-  int16_t barH = (c.h / 14 > 2) ? (c.h / 14) & ~1 : 2;
-  int16_t barY = c.h - 2 - barH;
-  int16_t gap = (barY - 16) / 3;
-  int16_t row1 = (barY - 16 - gap + 1) / 2;
-  c.rows = { row1, int16_t(row1 + 8 + gap), barY, barH };
-  return c;
-}
+static const SlotLayout HEADER_LAYOUT = { HEADER_H, HEADER_H, { {3, 3, 81, 1}, {3, 13, 81, 1}, {85, 3, 64, 1}, {85, 13, 64, 1} }, 23, 2 };
+// width is fixed at 150 px, so bigger text needs fewer columns: 2x/3x rows run across the card
+static const SlotLayout CARD_LAYOUTS[MAX_PER_PAGE] = {
+  // 1 per page, 117 px: one field per row, name at 3x, the rest at 2x
+  { 120, 117, { {3, 6, 146, 3}, {3, 37, 146, 2}, {3, 60, 146, 2}, {3, 83, 146, 2} }, 106, 8 },
+  // 2 per page, 57 px: name and ip at 2x on their own rows, disk and ram side by side at 1x
+  { 60, 57, { {3, 3, 146, 2}, {3, 22, 146, 2}, {3, 41, 71, 1}, {77, 41, 72, 1} }, 51, 4 },
+  // 3 per page, 37 px: too short for two 2x rows, so the 4-per-page grid with more spacing
+  { 40, 37, { {3, 6, 81, 1}, {3, 19, 81, 1}, {85, 6, 64, 1}, {85, 19, 64, 1} }, 33, 2 },
+  // 4 per page, 27 px: name / ip left, disk / ram right
+  { 30, 27, { {3, 3, 81, 1}, {3, 13, 81, 1}, {85, 3, 64, 1}, {85, 13, 64, 1} }, 23, 2 },
+};
 
 // cards per page: g_perPage is the live setting, g_card the layout of the frame being drawn
 // (only render() changes it, so a per_page= arriving mid-refresh can't tear the frame)
 static uint8_t g_perPage = ITEMS_PER_PAGE;
-static CardLayout g_card = cardLayout(ITEMS_PER_PAGE);
+static const SlotLayout* g_card = &CARD_LAYOUTS[ITEMS_PER_PAGE - 1];
 
-// sections of a slot that can go stale independently
+// sections of a slot that can go stale independently (bits 0..3 match F_NAME..F_RAM)
 enum : uint8_t { SEC_NAME = 0x01, SEC_IP = 0x02, SEC_DISK = 0x04, SEC_RAM = 0x08, SEC_BAR = 0x10, SEC_CARD = 0x20 };
 static const uint8_t SEC_COUNT = 6;
 struct Rect { int16_t x, y, w, h; };
@@ -170,28 +166,26 @@ static const Rect INDICATOR_RECT = { 0, 146, 152, 6 };
 
 static int16_t slotY(uint8_t slot)
 {
-  return slot ? HEADER_H + (slot - 1) * g_card.slotH : 0;
+  return slot ? HEADER_H + (slot - 1) * g_card->slotH : 0;
 }
 
-static const RowLayout& layoutOf(uint8_t slot)
+static const SlotLayout& layoutOf(uint8_t slot)
 {
-  return slot ? g_card.rows : HEADER_LAYOUT;
+  return slot ? *g_card : HEADER_LAYOUT;
 }
 
-// section rect relative to the slot top, 1 px around the text rows / bar; render() aligns the
-// union to the panel's 4x2 partial window grid
-static Rect sectionRect(uint8_t slot, uint8_t sec)
+// rect of section bit b relative to the slot top, 1 px around the cell / bar (icons are 9 rows
+// per scale step); render() aligns the union to the panel's 4x2 partial window grid
+static Rect sectionRect(uint8_t slot, uint8_t b)
 {
-  const RowLayout& l = layoutOf(slot);
-  switch (sec)
+  const SlotLayout& l = layoutOf(slot);
+  if (b < F_COUNT)
   {
-    case SEC_NAME: return { 0, int16_t(l.row1 - 1), 84, 10 };
-    case SEC_IP: return { 0, int16_t(l.row2 - 1), 84, 10 };
-    case SEC_DISK: return { 84, int16_t(l.row1 - 1), 68, 10 };
-    case SEC_RAM: return { 84, int16_t(l.row2 - 1), 68, 10 };
-    case SEC_BAR: return { 0, int16_t(l.barY - 1), SCREEN_W, int16_t(l.barH + 2) };
-    default: return { 0, 0, SCREEN_W, slot ? g_card.slotH : HEADER_H }; // SEC_CARD
+    const Cell& c = l.cells[b];
+    return { int16_t(c.x - 1), int16_t(c.y - 1), int16_t(c.w + 2), int16_t(9 * c.scale + 2) };
   }
+  if (b == 4) return { 0, int16_t(l.barY - 1), SCREEN_W, int16_t(l.barH + 2) }; // SEC_BAR
+  return { 0, 0, SCREEN_W, l.slotH };                                             // SEC_CARD
 }
 
 // ---------------------------------------------------------------- model
@@ -510,56 +504,82 @@ static int16_t charAdvance(char c)
   return ((c == '.') || (c == ':') || (c == ' ')) ? 3 : 6;
 }
 
-static int16_t textWidth(const char* s)
+static int16_t textWidth(const char* s, uint8_t scale)
 {
   int16_t w = 0;
   for (; *s; s++) w += charAdvance(*s);
-  return w > 0 ? w - 1 : 0;
+  return w > 0 ? (w - 1) * scale : 0;
 }
 
 // returns the x just past the drawn text
-static int16_t drawText(int16_t x, int16_t y, const char* s, int16_t maxW, uint16_t color)
+static int16_t drawText(int16_t x, int16_t y, const char* s, int16_t maxW, uint8_t scale, uint16_t color)
 {
   int16_t end = x + maxW;
   for (; *s; s++)
   {
-    int16_t adv = charAdvance(*s);
-    if (x + adv - 1 > end) break;
+    int16_t adv = charAdvance(*s) * scale;
+    if (x + adv - scale > end) break;
     // '.' and ':' glyphs sit in columns 1..2, shift them left to keep a 1 px gap on both sides
-    if (*s != ' ') display.drawChar(((*s == '.') || (*s == ':')) ? x - 1 : x, y, *s, color, color, 1);
+    if (*s != ' ') display.drawChar(((*s == '.') || (*s == ':')) ? x - scale : x, y, *s, color, color, scale);
     x += adv;
   }
   return x;
 }
 
-static int16_t drawValue(int16_t x, int16_t y, const char* v, uint16_t color)
+// largest scale up to maxScale at which s fits w, 0 if not even 1x does
+static uint8_t fitScale(const char* s, int16_t w, uint8_t maxScale)
+{
+  for (uint8_t sc = maxScale; sc > 0; sc--)
+  {
+    if (textWidth(s, sc) <= w) return sc;
+  }
+  return 0;
+}
+
+// text in a row 8 * maxScale tall, at the largest scale that fits (vertically centered), else cut
+// off at 1x; returns the drawn bounds
+static Rect drawFitText(int16_t x, int16_t y, int16_t w, uint8_t maxScale, const char* s, uint16_t color)
+{
+  uint8_t sc = fitScale(s, w, maxScale);
+  if (!sc) sc = 1;
+  y += (maxScale - sc) * 4;
+  int16_t end = drawText(x, y, s, w, sc, color);
+  return { x, y, int16_t(end - x), int16_t(8 * sc) };
+}
+
+// value with the unit shortened step by step until it fits (" GB", "GB", "G"), at the largest
+// scale where any of those fits; the bare value only if none does
+static Rect drawValue(int16_t x, int16_t y, int16_t w, uint8_t maxScale, const char* v, uint16_t color)
 {
   const char* unit = VALUE_UNIT;
   if (*v && *unit)
   {
     char buf[24];
-    snprintf(buf, sizeof(buf), "%s %s", v, unit);
-    if (textWidth(buf) > VALUE_W) snprintf(buf, sizeof(buf), "%s%s", v, unit);
-    if (textWidth(buf) > VALUE_W) snprintf(buf, sizeof(buf), "%s%c", v, unit[0]);
-    if (textWidth(buf) <= VALUE_W) return drawText(x, y, buf, VALUE_W, color);
+    for (uint8_t sc = maxScale; sc > 0; sc--)
+    {
+      snprintf(buf, sizeof(buf), "%s %s", v, unit);
+      if (textWidth(buf, sc) > w) snprintf(buf, sizeof(buf), "%s%s", v, unit);
+      if (textWidth(buf, sc) > w) snprintf(buf, sizeof(buf), "%s%c", v, unit[0]);
+      if (textWidth(buf, sc) <= w) return drawFitText(x, y, w, maxScale, buf, color); // fits at sc
+    }
   }
-  return drawText(x, y, v, VALUE_W, color);
+  return drawFitText(x, y, w, maxScale, v, color);
 }
 
-// 11x9 drive
-static void drawDiskIcon(int16_t x, int16_t y, uint16_t c)
-{
-  display.drawRoundRect(x, y, 11, 9, 2, c);
-  display.drawFastHLine(x + 1, y + 4, 9, c);
-  display.drawPixel(x + 2, y + 6, c);
-  display.drawPixel(x + 4, y + 6, c);
-}
+// icons as 1-bit rows (bit n = column n), drawn 9 rows tall from the text top, scaled like the text
+static const uint16_t DISK_ICON[9] = { 0x3FE, 0x401, 0x401, 0x401, 0x7FF, 0x401, 0x415, 0x401, 0x3FE }; // 11 wide drive
+static const uint16_t RAM_ICON[9] = { 0, 0xFFF, 0x801, 0xB6D, 0xB6D, 0x801, 0xFFF, 0, 0 };            // 12 wide module
+static const int16_t ICON_ADVANCE = 13; // icon plus a 1 px gap, per scale step
 
-// 12x6 memory module with three chips
-static void drawRamIcon(int16_t x, int16_t y, uint16_t c)
+static void drawIcon(const uint16_t* rows, int16_t x, int16_t y, uint8_t scale, uint16_t c)
 {
-  display.drawRect(x, y + 1, 12, 6, c);
-  for (int16_t i = 0; i < 3; i++) display.fillRect(x + 2 + 3 * i, y + 3, 2, 2, c);
+  for (int16_t r = 0; r < 9; r++)
+  {
+    for (int16_t col = 0; col < 12; col++)
+    {
+      if (rows[r] & (1 << col)) display.fillRect(x + col * scale, y + r * scale, scale, scale, c);
+    }
+  }
 }
 
 static uint16_t barColor(uint8_t pct, uint16_t low)
@@ -567,33 +587,34 @@ static uint16_t barColor(uint8_t pct, uint16_t low)
   return pct >= BAR_CRIT_PCT ? GxEPD_RED : pct >= BAR_WARN_PCT ? GxEPD_YELLOW : low;
 }
 
-// ends (optional) receives the x just past name, ip, disk value and ram value
-static void drawRowContent(const Entry& e, int16_t y0, const RowLayout& l, uint16_t titleColor, uint16_t color, int16_t* ends = nullptr)
+// drawn (optional) receives the bounds of name, ip, disk icon + value and ram icon + value
+static void drawRowContent(const Entry& e, int16_t y0, const SlotLayout& l, uint16_t titleColor, uint16_t color, Rect* drawn = nullptr)
 {
-  int16_t e0 = drawText(TEXT_X, y0 + l.row1, e.name, TEXT_W, titleColor);
-  int16_t e1 = drawText(TEXT_X, y0 + l.row2, e.ip, TEXT_W, color);
-  drawDiskIcon(ICON_X, y0 + l.row1, color);
-  int16_t e2 = drawValue(VALUE_X, y0 + l.row1, e.disk, color);
-  drawRamIcon(ICON_X, y0 + l.row2, color);
-  int16_t e3 = drawValue(VALUE_X, y0 + l.row2, e.ram, color);
-  if (ends)
+  for (uint8_t f = 0; f < F_COUNT; f++)
   {
-    ends[0] = e0;
-    ends[1] = e1;
-    ends[2] = e2;
-    ends[3] = e3;
+    const Cell& c = l.cells[f];
+    int16_t y = y0 + c.y;
+    Rect r;
+    if (f == F_NAME) r = drawFitText(c.x, y, c.w, c.scale, e.name, titleColor);
+    else if (f == F_IP) r = drawFitText(c.x, y, c.w, c.scale, e.ip, color);
+    else
+    {
+      drawIcon(f == F_DISK ? DISK_ICON : RAM_ICON, c.x, y, c.scale, color);
+      int16_t vx = c.x + ICON_ADVANCE * c.scale;
+      Rect v = drawValue(vx, y, c.w - ICON_ADVANCE * c.scale, c.scale, f == F_DISK ? e.disk : e.ram, color);
+      r = { c.x, y, int16_t(v.x + v.w - c.x), int16_t(9 * c.scale) };
+    }
+    if (drawn) drawn[f] = r;
   }
 }
 
-// true if (x, dy) lies on a card text row next to drawn content, with a 1 px margin
-static bool onContent(int16_t x, int16_t dy, const int16_t* ends)
+// true if (x, y) lies on drawn content, with a 1 px margin
+static bool onContent(int16_t x, int16_t y, const Rect* drawn)
 {
-  for (uint8_t row = 0; row < 2; row++)
+  for (uint8_t f = 0; f < F_COUNT; f++)
   {
-    int16_t top = row ? g_card.rows.row2 : g_card.rows.row1;
-    if ((dy < top - 1) || (dy > top + 8)) continue;
-    if ((x >= TEXT_X - 1) && (x <= ends[row])) return true;
-    if ((x >= ICON_X - 1) && (x <= ends[row + 2])) return true;
+    const Rect& r = drawn[f];
+    if ((x >= r.x - 1) && (x <= r.x + r.w) && (y >= r.y - 1) && (y <= r.y + r.h)) return true;
   }
   return false;
 }
@@ -609,22 +630,23 @@ static void drawCard(uint8_t i, const Entry& e)
 {
   if (!e.used) return;
   int16_t y0 = slotY(i + 1);
-  display.fillRoundRect(CARD_X, y0, CARD_W, g_card.h, CARD_R, GxEPD_WHITE);
-  int16_t ends[4];
-  drawRowContent(e, y0, g_card.rows, GxEPD_BLACK, GxEPD_BLACK, ends);
+  const SlotLayout& l = *g_card;
+  display.fillRoundRect(CARD_X, y0, CARD_W, l.h, CARD_R, GxEPD_WHITE);
+  Rect drawn[F_COUNT];
+  drawRowContent(e, y0, l, GxEPD_BLACK, GxEPD_BLACK, drawn);
   if (!e.online)
   {
     // offline: evenly spaced solid diagonals ('/', 2 px thick, 6 px apart), broken around text and icons
-    for (int16_t dy = 2; dy < g_card.h - 2; dy++)
+    for (int16_t dy = 2; dy < l.h - 2; dy++)
     {
       for (int16_t x = CARD_X + 2; x < CARD_X + CARD_W - 2; x++)
       {
-        if (((x + dy) % 6 < 2) && !onContent(x, dy, ends)) display.drawPixel(x, y0 + dy, GxEPD_BLACK);
+        if (((x + dy) % 6 < 2) && !onContent(x, y0 + dy, drawn)) display.drawPixel(x, y0 + dy, GxEPD_BLACK);
       }
     }
   }
   int16_t w = int32_t(CARD_W - 4) * e.bar / 100;
-  if (w > 0) display.fillRect(CARD_X + 2, y0 + g_card.rows.barY, w, g_card.rows.barH, barColor(e.bar, GxEPD_BLACK));
+  if (w > 0) display.fillRect(CARD_X + 2, y0 + l.barY, w, l.barH, barColor(e.bar, GxEPD_BLACK));
 }
 
 static void drawPageIndicator(uint8_t page, uint8_t pages)
@@ -666,7 +688,7 @@ static void render(bool full)
   for (uint8_t i = 0; i < g_perPage; i++) g_scene.items[i] = g_items[g_page * g_perPage + i];
   g_scene.page = g_page;
   g_scene.pages = pageCount();
-  g_card = cardLayout(g_perPage);
+  g_card = &CARD_LAYOUTS[g_perPage - 1];
 
   // bounding box of everything stale, one partial refresh per pass
   int16_t x0 = SCREEN_W, y0 = SCREEN_W, x1 = 0, y1 = 0;
@@ -674,7 +696,7 @@ static void render(bool full)
   {
     for (uint8_t b = 0; b < SEC_COUNT; b++)
     {
-      if (g_stale[s] & (1 << b)) unionRect(x0, y0, x1, y1, sectionRect(s, 1 << b), slotY(s));
+      if (g_stale[s] & (1 << b)) unionRect(x0, y0, x1, y1, sectionRect(s, b), slotY(s));
     }
     g_stale[s] = 0;
   }
