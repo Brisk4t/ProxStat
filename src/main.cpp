@@ -19,7 +19,7 @@
 //   d   disk "used/total", drawn as "<d> GB" (unit dropped/shortened when it doesn't fit)
 //   r   ram "used/total", same format
 //   b   bar 0..100 %: black/white below BAR_WARN_PCT, yellow below BAR_CRIT_PCT, red above
-//   on  0 = offline (card drawn dotted, stands in for the grey card of the mockup), 1 = online
+//   on  0 = offline (card drawn dark grey by dithering, white content), 1 = online
 // Only malformed lines get a reply ("ERR ...").
 //
 // Updates: every change marks its section (name, ip, disk, ram, bar or whole card) stale. Once
@@ -482,21 +482,22 @@ static void drawCard(uint8_t i, const Entry& e)
 {
   if (!e.used) return;
   int16_t y0 = (i + 1) * SLOT_H;
-  display.fillRoundRect(CARD_X, y0, CARD_W, CARD_H, CARD_R, GxEPD_WHITE);
-  if (!e.online)
+  uint16_t color = GxEPD_BLACK;
+  if (e.online) display.fillRoundRect(CARD_X, y0, CARD_W, CARD_H, CARD_R, GxEPD_WHITE);
+  else
   {
-    // no grey on this panel: a sparse staggered dot grid dims the card instead
-    for (int16_t y = y0 + 2; y < y0 + CARD_H - 2; y += 4)
+    // no grey on this panel: dark grey is a 75% black dither (one white pixel per 2x2), with white content;
+    // dots stay 2 px inside the edge so none land outside the rounded corners
+    display.fillRoundRect(CARD_X, y0, CARD_W, CARD_H, CARD_R, GxEPD_BLACK);
+    for (int16_t y = y0 + 2; y < y0 + CARD_H - 2; y += 2)
     {
-      for (int16_t x = CARD_X + 2 + ((y - y0) / 4 % 2) * 2; x < CARD_X + CARD_W - 2; x += 4)
-      {
-        display.drawPixel(x, y, GxEPD_BLACK);
-      }
+      for (int16_t x = CARD_X + 2; x < CARD_X + CARD_W - 2; x += 2) display.drawPixel(x, y, GxEPD_WHITE);
     }
+    color = GxEPD_WHITE;
   }
-  drawRowContent(e, y0, GxEPD_BLACK, GxEPD_BLACK);
+  drawRowContent(e, y0, color, color);
   int16_t w = int32_t(CARD_W - 4) * e.bar / 100;
-  if (w > 0) display.fillRect(CARD_X + 2, y0 + BAR_DY, w, BAR_H, barColor(e.bar, GxEPD_BLACK));
+  if (w > 0) display.fillRect(CARD_X + 2, y0 + BAR_DY, w, BAR_H, barColor(e.bar, color));
 }
 
 static void drawPageIndicator(uint8_t page, uint8_t pages)
