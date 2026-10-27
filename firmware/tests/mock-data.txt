@@ -1,4 +1,4 @@
-# Mock data for StatMonitorEPD, one protocol line per line (see the README or the src/main.cpp header).
+# Mock data for ProxStat Epaper, one protocol line per line (see the README or the src/main.cpp header).
 # Lines starting with '#' and blank lines are skipped by send-mock.ps1 / send-mock.sh.
 H|n=Proxmox:|ip=192.168.1.254|d=412/931|r=27/64|b=86
 1|n=Container 1|ip=192.168.1.123|d=12/256|r=3.1/8|b=91|on=1

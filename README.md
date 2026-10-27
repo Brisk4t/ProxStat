@@ -1,4 +1,4 @@
-# StatMonitorEPD
+# ProxStat EPaper
 
 Shows a host and up to 12 containers or VMs on a 1.54" 152×152 4-color e-paper panel (black, white, yellow, red). Data arrives over USB serial. Only the parts of the screen that changed get redrawn.
 

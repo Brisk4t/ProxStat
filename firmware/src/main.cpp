@@ -1,4 +1,4 @@
-// StatMonitorEPD: host + container status list on a 1.54" 152x152 4-color e-paper
+// ProxStat Epaper: host + container status list on a 1.54" 152x152 4-color e-paper
 // (black/white/yellow/red, GxEPD2_154c_152 driver in /lib).
 //
 // Layout: a header row (the host) and ITEMS_PER_PAGE cards per page (1..4, default 4), 12 cards max.
@@ -738,7 +738,7 @@ void setup()
 #ifdef EPD_DEBUG
   // USB CDC drops output until the host opens the port; give it a moment
   for (uint32_t t = millis(); !Serial && (millis() - t < 3000);) {}
-  Serial.println("StatMonitorEPD boot");
+  Serial.println("ProxStat boot");
 #endif
   // no driver diagnostics: they call Serial.begin() again on the USB CDC; onBusy's heartbeat covers timing
   display.init(0, true, 40, false); // 40 ms reset pulse

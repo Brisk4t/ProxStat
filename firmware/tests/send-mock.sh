@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sends mock data to StatMonitorEPD over serial and prints anything the device replies.
+# Sends mock data to ProxStat over serial and prints anything the device replies.
 #   tests/send-mock.sh                              # /dev/ttyACM0, all of tests/mock-data.txt
 #   tests/send-mock.sh -p COM10                     # Git Bash on Windows (COMn -> /dev/ttyS<n-1>)
 #   tests/send-mock.sh -p /dev/ttyUSB0 -f other.txt

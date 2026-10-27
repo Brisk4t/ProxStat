@@ -1,4 +1,4 @@
-# Sends mock data to StatMonitorEPD over serial and prints anything the device replies.
+# Sends mock data to ProxStat over serial and prints anything the device replies.
 #   .\tests\send-mock.ps1                          # COM10, all of tests\mock-data.txt
 #   .\tests\send-mock.ps1 -Port COM5 -File other.txt
 #   .\tests\send-mock.ps1 -Line '2|b=85'           # send literal lines
