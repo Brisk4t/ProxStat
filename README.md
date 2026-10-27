@@ -9,14 +9,17 @@ Shows a host and up to 12 containers or VMs on a 1.54" 152×152 4-color e-paper 
 - Serial input keeps being read while the panel refreshes (12–25 s), so the host never blocks.
 - A full refresh runs every 12 hours to clear ghosting and prevent burn-in.
 
-Supported boards: STM32F103 Blue Pill, ESP32-C3 SuperMini, ESP32-S3. The panel driver is in [lib/GxEPD2_154c_152](lib/GxEPD2_154c_152).
+Supported boards: STM32F103 Blue Pill, ESP32-C3 SuperMini, ESP32-S3. The panel driver is in [firmware/lib/GxEPD2_154c_152](firmware/lib/GxEPD2_154c_152).
 
 ## Building
 
+The PlatformIO project lives in [firmware/](firmware). From the repo root:
+
 ```sh
-pio run -e stm32f103 -t upload          # Blue Pill (DFU)
-pio run -e esp32c3_supermini -t upload
-pio run -e esp32s3_n16r8 -t upload
+pio run -d firmware -e stm32f103 -t upload          # Blue Pill (DFU)
+pio run -d firmware -e esp32c3_supermini -t upload
+pio run -d firmware -e esp32s3_n16r8 -t upload
+pio device monitor -d firmware -e stm32f103
 ```
 
 ## Wiring
@@ -32,11 +35,11 @@ pio run -e esp32s3_n16r8 -t upload
 | Page button (to GND) | PB11 | 9 (BOOT) | 0 (BOOT) |
 | LED (lit while refreshing) | PC13 | none | none |
 
-Pins are set per board in [platformio.ini](platformio.ini). On the Blue Pill, SCK and MOSI must be SPI1 pins. Keep clear of PA11/PA12 (USB), PA13/PA14 (SWD) and PB2 (BOOT1).
+Pins are set per board in [firmware/platformio.ini](firmware/platformio.ini). On the Blue Pill, SCK and MOSI must be SPI1 pins. Keep clear of PA11/PA12 (USB), PA13/PA14 (SWD) and PB2 (BOOT1).
 
 ## Build flags
 
-These go in the `[epd]` section of [platformio.ini](platformio.ini), which every board uses.
+These go in the `[epd]` section of [firmware/platformio.ini](firmware/platformio.ini), which every board uses.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -116,7 +119,7 @@ H|n=Proxmox:|ip=192.168.1.254|d=412/931|r=27/64|b=86
 
 ## Tests
 
-[tests/](tests) holds two scripts that send mock data: [send-mock.ps1](tests/send-mock.ps1) for Windows PowerShell and [send-mock.sh](tests/send-mock.sh) for bash or Git Bash. With no test mode, they send [mock-data.txt](tests/mock-data.txt): a header, 4 items on page 1 (one of them offline), and 2 items on page 2 that test the longest IP and value shortening.
+[firmware/tests/](firmware/tests) holds two scripts that send mock data: [send-mock.ps1](firmware/tests/send-mock.ps1) for Windows PowerShell and [send-mock.sh](firmware/tests/send-mock.sh) for bash or Git Bash. With no test mode, they send [mock-data.txt](firmware/tests/mock-data.txt): a header, 4 items on page 1 (one of them offline), and 2 items on page 2 that test the longest IP and value shortening.
 
 Close any serial monitor on the port first, or the scripts can't open it.
 
@@ -135,16 +138,16 @@ Every test except `mock` uses random values, so each send is a real change.
 ### PowerShell
 
 ```powershell
-.\tests\send-mock.ps1                                        # COM10, the mock file
-.\tests\send-mock.ps1 -Port COM5 -File tests\other.txt
-.\tests\send-mock.ps1 -Test item -Item 2                     # whole item 2
-.\tests\send-mock.ps1 -Test bar -Item 2                      # only item 2's usage bar
-.\tests\send-mock.ps1 -Test disk -Item H                     # only the header's disk value
-.\tests\send-mock.ps1 -Test fields -Item 3 -IntervalMs 30000 # each field in its own refresh
-.\tests\send-mock.ps1 -Test bar -Count 20 -IntervalMs 100    # rapid updates, should give one refresh
-.\tests\send-mock.ps1 -Line '4|on=1','next'                  # literal lines
-.\tests\send-mock.ps1 -Line 'rot=1'                          # rotate 90 degrees
-.\tests\send-mock.ps1 -Line 'ver'                            # protocol version and limits
+.\firmware\tests\send-mock.ps1                                        # COM10, the mock file
+.\firmware\tests\send-mock.ps1 -Port COM5 -File firmware\tests\other.txt
+.\firmware\tests\send-mock.ps1 -Test item -Item 2                     # whole item 2
+.\firmware\tests\send-mock.ps1 -Test bar -Item 2                      # only item 2's usage bar
+.\firmware\tests\send-mock.ps1 -Test disk -Item H                     # only the header's disk value
+.\firmware\tests\send-mock.ps1 -Test fields -Item 3 -IntervalMs 30000 # each field in its own refresh
+.\firmware\tests\send-mock.ps1 -Test bar -Count 20 -IntervalMs 100    # rapid updates, should give one refresh
+.\firmware\tests\send-mock.ps1 -Line '4|on=1','next'                  # literal lines
+.\firmware\tests\send-mock.ps1 -Line 'rot=1'                          # rotate 90 degrees
+.\firmware\tests\send-mock.ps1 -Line 'ver'                            # protocol version and limits
 ```
 
 Parameters: `-Port` (default `COM10`), `-File`, `-Test`, `-Item` (`1`–`12` or `H`, default `1`), `-Count`, `-IntervalMs`, `-Line`, `-Baud`, `-ReplyMs`.
@@ -152,16 +155,16 @@ Parameters: `-Port` (default `COM10`), `-File`, `-Test`, `-Item` (`1`–`12` or 
 ### Bash
 
 ```bash
-tests/send-mock.sh -p /dev/ttyACM0                 # Linux, the mock file
-tests/send-mock.sh -p COM10                        # Git Bash: COMn becomes /dev/ttyS<n-1>
-tests/send-mock.sh -p COM10 -t item -i 2
-tests/send-mock.sh -p COM10 -t bar -i 2
-tests/send-mock.sh -p COM10 -t disk -i H
-tests/send-mock.sh -p COM10 -t fields -i 3 -d 30000
-tests/send-mock.sh -p COM10 -t bar -n 20 -d 100
-tests/send-mock.sh -p COM10 '4|on=1' 'next'        # literal lines
-tests/send-mock.sh -p COM10 'rot=1'                # rotate 90 degrees
-tests/send-mock.sh -p COM10 'ver'                  # protocol version and limits
+firmware/tests/send-mock.sh -p /dev/ttyACM0                 # Linux, the mock file
+firmware/tests/send-mock.sh -p COM10                        # Git Bash: COMn becomes /dev/ttyS<n-1>
+firmware/tests/send-mock.sh -p COM10 -t item -i 2
+firmware/tests/send-mock.sh -p COM10 -t bar -i 2
+firmware/tests/send-mock.sh -p COM10 -t disk -i H
+firmware/tests/send-mock.sh -p COM10 -t fields -i 3 -d 30000
+firmware/tests/send-mock.sh -p COM10 -t bar -n 20 -d 100
+firmware/tests/send-mock.sh -p COM10 '4|on=1' 'next'        # literal lines
+firmware/tests/send-mock.sh -p COM10 'rot=1'                # rotate 90 degrees
+firmware/tests/send-mock.sh -p COM10 'ver'                  # protocol version and limits
 ```
 
 Options: `-p` port (default `/dev/ttyACM0`), `-f` file, `-t` test, `-i` item, `-n` count, `-d` interval in ms, `-b` baud.
