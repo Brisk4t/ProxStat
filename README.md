@@ -2,7 +2,7 @@
 
 Shows a host and up to 12 containers or VMs on a 1.54" 152×152 4-color e-paper panel (black, white, yellow, red). Data arrives over USB serial. Only the parts of the screen that changed get redrawn.
 
-- One header row (the host) and 1–4 list items per page (`ITEMS_PER_PAGE`, default 4), up to 12 items. With fewer items per page, each card is taller.
+- One header row (the host) and 1–4 list items per page (set with the `per_page=N` command; default 4, or `ITEMS_PER_PAGE`), up to 12 items. With fewer items per page, each card is taller.
 - A button steps to the next page and wraps around after the last one.
 - Each item shows a name, an IP, disk and RAM usage, and a usage bar. Offline items are drawn with diagonal lines.
 - Each change marks only its section stale (name, IP, disk, RAM or bar). All stale sections are drawn in one partial refresh.
@@ -46,7 +46,7 @@ These go in the `[epd]` section of [firmware/platformio.ini](firmware/platformio
 | `EPD_FRAME_RATE` | `0` | Panel frame rate in Hz: 12 (12.5), 25, 50, 65, 75, 85, 100 or 120. The nearest supported rate is used. `0` uses the vendor default. |
 | `EPD_TEMPERATURE` | `93` | Temperature in °C forced on the controller, which uses it to choose a waveform. 93 selects the fastest one. Lower values are slower but give more contrast. |
 | `EPD_ROTATION` | `0` | Rotation at boot, in 90° steps clockwise: `0`, `1`, `2`, or `-1` for 270°. The `rot=N` serial command changes it until the next reset. |
-| `ITEMS_PER_PAGE` | `4` | List items per page, 1–4. Cards share the space below the header evenly: 27, 37, 57 or 117 px tall. The text rows spread out and the usage bar thickens (2, 2, 4, 8 px), but the font stays the same size. |
+| `ITEMS_PER_PAGE` | `4` | List items per page at boot, 1–4. The `per_page=N` serial command changes it until the next reset. Cards share the space below the header evenly: 27, 37, 57 or 117 px tall. The text rows spread out and the usage bar thickens (2, 2, 4, 8 px), but the font stays the same size. |
 | `EPD_ABORT_MS` | `0` | Cuts partial refreshes short after this many ms, for faster but less clean updates. `0` = off. Full refreshes always finish. |
 | `EPD_PAGE_HEIGHT` | `38` on STM32, `152` elsewhere | Rows drawn per pass. 152 = whole frame (5.8 KB buffer). 38 = 4 passes (1.4 KB). The board has only been tested with `152`. |
 | `EPD_SPI_HZ` | `10000000` | SPI clock. 4 MHz hung the Blue Pill on its first command after reset, so leave this at 10 MHz unless you have a reason to change it. |
@@ -71,7 +71,7 @@ Every non-empty line gets exactly one reply, in the order the lines were sent:
 | `ERR <reason>` | The line was rejected, or one of its fields was. Good fields on the same line are still applied, and the reply gives the first error. |
 | `VER ...` | The reply to `ver` (see [Commands](#commands)). |
 
-Reasons: `unknown command`, `unknown field`, `field without '='`, `item must be H or 1..12`, `no such page`, `rotation must be -1..3`, `line too long`.
+Reasons: `unknown command`, `unknown field`, `field without '='`, `item must be H or 1..12`, `no such page`, `rotation must be -1..3`, `per_page must be 1..4`, `line too long`.
 
 With `EPD_DEBUG` on, debug lines are mixed in with the replies. Debug lines never start with `OK`, `ERR ` or `VER `, so a host can skip anything else. Because the replies are in order, the host can match them to lines by counting, without sequence numbers.
 
@@ -105,8 +105,9 @@ Each field redraws only its own section of the screen. Changing `on`, or setting
 | `next` | Next page, same as pressing the button. |
 | `page=2` | Jump to page 2. |
 | `rot=1` | Rotate the drawing: `0`, `1`, `2`, `3`, or `-1` (same as `3`), in 90° steps clockwise. Triggers a full refresh. Not saved: after a reset, `EPD_ROTATION` applies again. |
+| `per_page=2` | Show 1–4 list items per page. Item numbers don't change: with 2 per page, items `1`–`2` are page 1, `3`–`4` page 2 and so on. The display stays on the page that holds the first item shown before the change. Triggers a full refresh. Not saved: after a reset, `ITEMS_PER_PAGE` applies again. |
 | `full` | Run a full refresh now. |
-| `ver` | Reply with the protocol version and limits, e.g. `VER 1 items=12 per_page=4 n=15 ip=15 d=11 r=11 line=127`: the item count, items per page, maximum length of each field, and maximum line length. The version goes up whenever the protocol changes in a way that isn't backward compatible. |
+| `ver` | Reply with the protocol version and limits, e.g. `VER 1 items=12 per_page=4 n=15 ip=15 d=11 r=11 line=127`: the item count, the current items per page, maximum length of each field, and maximum line length. The version goes up whenever the protocol changes in a way that isn't backward compatible. |
 
 ### Example
 
@@ -147,6 +148,7 @@ Every test except `mock` uses random values, so each send is a real change.
 .\firmware\tests\send-mock.ps1 -Test bar -Count 20 -IntervalMs 100    # rapid updates, should give one refresh
 .\firmware\tests\send-mock.ps1 -Line '4|on=1','next'                  # literal lines
 .\firmware\tests\send-mock.ps1 -Line 'rot=1'                          # rotate 90 degrees
+.\firmware\tests\send-mock.ps1 -Line 'per_page=2'                     # 2 taller cards per page
 .\firmware\tests\send-mock.ps1 -Line 'ver'                            # protocol version and limits
 ```
 
@@ -164,6 +166,7 @@ firmware/tests/send-mock.sh -p COM10 -t fields -i 3 -d 30000
 firmware/tests/send-mock.sh -p COM10 -t bar -n 20 -d 100
 firmware/tests/send-mock.sh -p COM10 '4|on=1' 'next'        # literal lines
 firmware/tests/send-mock.sh -p COM10 'rot=1'                # rotate 90 degrees
+firmware/tests/send-mock.sh -p COM10 'per_page=2'           # 2 taller cards per page
 firmware/tests/send-mock.sh -p COM10 'ver'                  # protocol version and limits
 ```
 

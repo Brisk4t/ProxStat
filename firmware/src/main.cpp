@@ -1,8 +1,8 @@
 // ProxStat Epaper: host + container status list on a 1.54" 152x152 4-color e-paper
 // (black/white/yellow/red, GxEPD2_154c_152 driver in /lib).
 //
-// Layout: a header row (the host) and ITEMS_PER_PAGE cards per page (1..4, default 4), 12 cards max.
-// Fewer cards per page make each card taller. A button on BUTTON_PIN (active low) steps to the
+// Layout: a header row (the host) and 1..4 cards per page ("per_page=", ITEMS_PER_PAGE at boot),
+// 12 cards max. Fewer cards per page make each card taller. A button on BUTTON_PIN (active low) steps to the
 // next page and wraps around.
 //
 // Serial protocol: one command per line ('\n' or "\r\n"), max 127 chars.
@@ -15,7 +15,9 @@
 //   page=2                  jump to page 2
 //   rot=1                   draw rotation in 90 degree steps: 0, 1, 2, 3 or -1 (= 3); full refresh.
 //                           Not saved, EPD_ROTATION applies again after a reset
-//   full                    full refresh now
+//   per_page=2              cards per page, 1..4; full refresh, keeps the first shown item on screen.
+//                           Not saved, ITEMS_PER_PAGE applies again after a reset
+//   full                   full refresh now
 //   ver                     protocol version and limits:
 //                           "VER 1 items=12 per_page=4 n=15 ip=15 d=11 r=11 line=127"
 // Fields:
@@ -45,7 +47,7 @@
 //   EPD_PAGE_HEIGHT     rows per drawing page (default 38 on STM32 = 1444 B, full frame elsewhere)
 //   EPD_SPI_HZ          SPI clock (default 10 MHz)
 //   EPD_ROTATION        rotation at boot in 90 degree steps clockwise: 0, 1, 2, -1 (= 270); "rot=" changes it
-//   ITEMS_PER_PAGE      cards per page, 1..4 (default 4); card height scales to fill the screen
+//   ITEMS_PER_PAGE      cards per page at boot, 1..4 (default 4); "per_page=" changes it
 //   FULL_REFRESH_HOURS  full refresh interval (default 12, fractions allowed)
 //   UPDATE_HOLDOFF_MS   batch window before a partial refresh (default 300)
 //   BAR_WARN_PCT, BAR_CRIT_PCT  bar color thresholds (default 50, 80)
@@ -123,12 +125,12 @@ static const uint32_t FULL_REFRESH_MS = uint32_t(FULL_REFRESH_HOURS * 3600000UL)
 static const uint32_t BUTTON_DEBOUNCE_MS = 30;
 
 // ---------------------------------------------------------------- layout (152x152)
-// slot 0 is the header (30 rows), slots 1..ITEMS_PER_PAGE the cards, which split the rows down to
-// the page indicator evenly (30, 40, 60 or 120 rows); every slot ends in a 3 row gap
+// slot 0 is the header (30 rows), slots 1..per page the cards, which split the rows down to the
+// page indicator evenly (30, 40, 60 or 120 rows); every slot ends in a 3 row gap
+static const uint8_t MAX_PER_PAGE = 4;
 static const int16_t SCREEN_W = 152;
 static const int16_t HEADER_H = 30;
-static const int16_t CARD_SLOT_H = ((SCREEN_W - HEADER_H - 2) / ITEMS_PER_PAGE) & ~1;
-static const int16_t CARD_X = 1, CARD_W = 150, CARD_H = CARD_SLOT_H - 3, CARD_R = 3;
+static const int16_t CARD_X = 1, CARD_W = 150, CARD_R = 3;
 static const int16_t TEXT_X = 3, TEXT_W = 81;   // name / ip column, 3..83
 static const int16_t ICON_X = 85;               // 12 px icons, 85..96
 static const int16_t VALUE_X = 98, VALUE_W = 51; // 98..148
@@ -137,13 +139,28 @@ static const int16_t INDICATOR_Y = 148, INDICATOR_H = 2;
 // vertical layout within a slot: two 8 px text rows and the usage bar below them
 struct RowLayout { int16_t row1, row2, barY, barH; };
 static const RowLayout HEADER_LAYOUT = { 3, 13, 23, 2 };
-// cards: the bar thickens with the card (2, 2, 4, 8 px) and sits 2 rows above its bottom edge;
-// the rows above the bar split into top margin, row gap and bottom margin (3, 2, 2 at 4 per page)
-static const int16_t CARD_BAR_H = (CARD_H / 14 > 2) ? (CARD_H / 14) & ~1 : 2;
-static const int16_t CARD_BAR_Y = CARD_H - 2 - CARD_BAR_H;
-static const int16_t CARD_ROW_GAP = (CARD_BAR_Y - 16) / 3;
-static const int16_t CARD_ROW1 = (CARD_BAR_Y - 16 - CARD_ROW_GAP + 1) / 2;
-static const RowLayout CARD_LAYOUT = { CARD_ROW1, int16_t(CARD_ROW1 + 8 + CARD_ROW_GAP), CARD_BAR_Y, CARD_BAR_H };
+
+struct CardLayout { int16_t slotH, h; RowLayout rows; };
+
+// the bar thickens with the card (2, 2, 4, 8 px) and sits 2 rows above its bottom edge; the rows
+// above the bar split into top margin, row gap and bottom margin (3, 2, 2 at 4 per page)
+static CardLayout cardLayout(uint8_t perPage)
+{
+  CardLayout c;
+  c.slotH = ((SCREEN_W - HEADER_H - 2) / perPage) & ~1;
+  c.h = c.slotH - 3;
+  int16_t barH = (c.h / 14 > 2) ? (c.h / 14) & ~1 : 2;
+  int16_t barY = c.h - 2 - barH;
+  int16_t gap = (barY - 16) / 3;
+  int16_t row1 = (barY - 16 - gap + 1) / 2;
+  c.rows = { row1, int16_t(row1 + 8 + gap), barY, barH };
+  return c;
+}
+
+// cards per page: g_perPage is the live setting, g_card the layout of the frame being drawn
+// (only render() changes it, so a per_page= arriving mid-refresh can't tear the frame)
+static uint8_t g_perPage = ITEMS_PER_PAGE;
+static CardLayout g_card = cardLayout(ITEMS_PER_PAGE);
 
 // sections of a slot that can go stale independently
 enum : uint8_t { SEC_NAME = 0x01, SEC_IP = 0x02, SEC_DISK = 0x04, SEC_RAM = 0x08, SEC_BAR = 0x10, SEC_CARD = 0x20 };
@@ -153,12 +170,12 @@ static const Rect INDICATOR_RECT = { 0, 146, 152, 6 };
 
 static int16_t slotY(uint8_t slot)
 {
-  return slot ? HEADER_H + (slot - 1) * CARD_SLOT_H : 0;
+  return slot ? HEADER_H + (slot - 1) * g_card.slotH : 0;
 }
 
 static const RowLayout& layoutOf(uint8_t slot)
 {
-  return slot ? CARD_LAYOUT : HEADER_LAYOUT;
+  return slot ? g_card.rows : HEADER_LAYOUT;
 }
 
 // section rect relative to the slot top, 1 px around the text rows / bar; render() aligns the
@@ -173,12 +190,12 @@ static Rect sectionRect(uint8_t slot, uint8_t sec)
     case SEC_DISK: return { 84, int16_t(l.row1 - 1), 68, 10 };
     case SEC_RAM: return { 84, int16_t(l.row2 - 1), 68, 10 };
     case SEC_BAR: return { 0, int16_t(l.barY - 1), SCREEN_W, int16_t(l.barH + 2) };
-    default: return { 0, 0, SCREEN_W, slot ? CARD_SLOT_H : HEADER_H }; // SEC_CARD
+    default: return { 0, 0, SCREEN_W, slot ? g_card.slotH : HEADER_H }; // SEC_CARD
   }
 }
 
 // ---------------------------------------------------------------- model
-static const uint8_t ITEM_COUNT = 12, SLOT_COUNT = ITEMS_PER_PAGE + 1;
+static const uint8_t ITEM_COUNT = 12, SLOT_COUNT = MAX_PER_PAGE + 1; // 1..4 per page all divide 12
 
 struct Entry
 {
@@ -206,8 +223,8 @@ static uint8_t g_rotation = ((EPD_ROTATION % 4) + 4) % 4; // -1 -> 3
 struct Scene
 {
   Entry header;
-  Entry items[ITEMS_PER_PAGE];
-  uint8_t page, pages;
+  Entry items[MAX_PER_PAGE];
+  uint8_t page, pages, perPage;
 };
 static Scene g_scene;
 
@@ -232,7 +249,7 @@ static void replyVersion()
 {
   char buf[80];
   snprintf(buf, sizeof(buf), "VER %d items=%d per_page=%d n=%d ip=%d d=%d r=%d line=%d", PROTOCOL_VERSION, ITEM_COUNT,
-           ITEMS_PER_PAGE, int(sizeof(g_header.name) - 1), int(sizeof(g_header.ip) - 1), int(sizeof(g_header.disk) - 1),
+           g_perPage, int(sizeof(g_header.name) - 1), int(sizeof(g_header.ip) - 1), int(sizeof(g_header.disk) - 1),
            int(sizeof(g_header.ram) - 1), int(sizeof(g_line) - 1));
   Serial.println(buf);
 }
@@ -253,7 +270,7 @@ static uint8_t pageCount()
 {
   for (int8_t i = ITEM_COUNT - 1; i >= 0; i--)
   {
-    if (g_items[i].used) return i / ITEMS_PER_PAGE + 1;
+    if (g_items[i].used) return i / g_perPage + 1;
   }
   return 1;
 }
@@ -284,7 +301,7 @@ static void setPage(uint8_t page)
 {
   if (page == g_page) return;
   g_page = page;
-  for (uint8_t s = 1; s < SLOT_COUNT; s++) markStale(s, SEC_CARD);
+  for (uint8_t s = 1; s <= g_perPage; s++) markStale(s, SEC_CARD);
   markIndicatorStale();
 }
 
@@ -296,7 +313,7 @@ static void nextPage()
 // slot showing item idx, -1 when it is on another page
 static int8_t slotOf(uint8_t idx)
 {
-  return (idx / ITEMS_PER_PAGE == g_page) ? idx % ITEMS_PER_PAGE + 1 : -1;
+  return (idx / g_perPage == g_page) ? idx % g_perPage + 1 : -1;
 }
 
 static bool copyIfChanged(char* dst, size_t size, const char* src)
@@ -375,7 +392,7 @@ static const char* execLine(char* line)
   {
     for (uint8_t i = 0; i < ITEM_COUNT; i++) resetEntry(g_items[i]);
     g_page = 0;
-    for (uint8_t s = 1; s < SLOT_COUNT; s++) markStale(s, SEC_CARD);
+    for (uint8_t s = 1; s <= g_perPage; s++) markStale(s, SEC_CARD);
     markIndicatorStale();
   }
   else if (strcmp(line, "full") == 0) g_fullPending = true;
@@ -394,6 +411,19 @@ static const char* execLine(char* line)
     {
       // applied by the next render, never mid-frame; everything moves, so redraw it all
       g_rotation = (r + 4) % 4;
+      g_fullPending = true;
+    }
+  }
+  else if (strncmp(line, "per_page=", 9) == 0)
+  {
+    int n = atoi(line + 9);
+    if ((n < 1) || (n > MAX_PER_PAGE)) return "per_page must be 1..4";
+    if (n != g_perPage)
+    {
+      // stay on the page holding the first item shown now; every card moves, so redraw it all
+      uint8_t first = g_page * g_perPage;
+      g_perPage = n;
+      g_page = first / n;
       g_fullPending = true;
     }
   }
@@ -560,7 +590,7 @@ static bool onContent(int16_t x, int16_t dy, const int16_t* ends)
 {
   for (uint8_t row = 0; row < 2; row++)
   {
-    int16_t top = row ? CARD_LAYOUT.row2 : CARD_LAYOUT.row1;
+    int16_t top = row ? g_card.rows.row2 : g_card.rows.row1;
     if ((dy < top - 1) || (dy > top + 8)) continue;
     if ((x >= TEXT_X - 1) && (x <= ends[row])) return true;
     if ((x >= ICON_X - 1) && (x <= ends[row + 2])) return true;
@@ -579,13 +609,13 @@ static void drawCard(uint8_t i, const Entry& e)
 {
   if (!e.used) return;
   int16_t y0 = slotY(i + 1);
-  display.fillRoundRect(CARD_X, y0, CARD_W, CARD_H, CARD_R, GxEPD_WHITE);
+  display.fillRoundRect(CARD_X, y0, CARD_W, g_card.h, CARD_R, GxEPD_WHITE);
   int16_t ends[4];
-  drawRowContent(e, y0, CARD_LAYOUT, GxEPD_BLACK, GxEPD_BLACK, ends);
+  drawRowContent(e, y0, g_card.rows, GxEPD_BLACK, GxEPD_BLACK, ends);
   if (!e.online)
   {
     // offline: evenly spaced solid diagonals ('/', 2 px thick, 6 px apart), broken around text and icons
-    for (int16_t dy = 2; dy < CARD_H - 2; dy++)
+    for (int16_t dy = 2; dy < g_card.h - 2; dy++)
     {
       for (int16_t x = CARD_X + 2; x < CARD_X + CARD_W - 2; x++)
       {
@@ -594,7 +624,7 @@ static void drawCard(uint8_t i, const Entry& e)
     }
   }
   int16_t w = int32_t(CARD_W - 4) * e.bar / 100;
-  if (w > 0) display.fillRect(CARD_X + 2, y0 + CARD_LAYOUT.barY, w, CARD_LAYOUT.barH, barColor(e.bar, GxEPD_BLACK));
+  if (w > 0) display.fillRect(CARD_X + 2, y0 + g_card.rows.barY, w, g_card.rows.barH, barColor(e.bar, GxEPD_BLACK));
 }
 
 static void drawPageIndicator(uint8_t page, uint8_t pages)
@@ -616,7 +646,7 @@ static void drawScene()
 {
   display.fillScreen(GxEPD_BLACK);
   drawHeader(g_scene.header);
-  for (uint8_t i = 0; i < ITEMS_PER_PAGE; i++) drawCard(i, g_scene.items[i]);
+  for (uint8_t i = 0; i < g_scene.perPage; i++) drawCard(i, g_scene.items[i]);
   drawPageIndicator(g_scene.page, g_scene.pages);
 }
 
@@ -632,9 +662,11 @@ static void render(bool full)
 {
   display.setRotation(g_rotation);
   g_scene.header = g_header;
-  for (uint8_t i = 0; i < ITEMS_PER_PAGE; i++) g_scene.items[i] = g_items[g_page * ITEMS_PER_PAGE + i];
+  g_scene.perPage = g_perPage;
+  for (uint8_t i = 0; i < g_perPage; i++) g_scene.items[i] = g_items[g_page * g_perPage + i];
   g_scene.page = g_page;
   g_scene.pages = pageCount();
+  g_card = cardLayout(g_perPage);
 
   // bounding box of everything stale, one partial refresh per pass
   int16_t x0 = SCREEN_W, y0 = SCREEN_W, x1 = 0, y1 = 0;
