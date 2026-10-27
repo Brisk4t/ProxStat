@@ -19,7 +19,7 @@
 //   d   disk "used/total", drawn as "<d> GB" (unit dropped/shortened when it doesn't fit)
 //   r   ram "used/total", same format
 //   b   bar 0..100 %: black/white below BAR_WARN_PCT, yellow below BAR_CRIT_PCT, red above
-//   on  0 = offline (card drawn dark grey by dithering, white content), 1 = online
+//   on  0 = offline (diagonal lines across the card, broken around the text), 1 = online
 // Only malformed lines get a reply ("ERR ...").
 //
 // Updates: every change marks its section (name, ip, disk, ram, bar or whole card) stale. Once
@@ -413,7 +413,8 @@ static int16_t textWidth(const char* s)
   return w > 0 ? w - 1 : 0;
 }
 
-static void drawText(int16_t x, int16_t y, const char* s, int16_t maxW, uint16_t color)
+// returns the x just past the drawn text
+static int16_t drawText(int16_t x, int16_t y, const char* s, int16_t maxW, uint16_t color)
 {
   int16_t end = x + maxW;
   for (; *s; s++)
@@ -424,9 +425,10 @@ static void drawText(int16_t x, int16_t y, const char* s, int16_t maxW, uint16_t
     if (*s != ' ') display.drawChar(((*s == '.') || (*s == ':')) ? x - 1 : x, y, *s, color, color, 1);
     x += adv;
   }
+  return x;
 }
 
-static void drawValue(int16_t x, int16_t y, const char* v, uint16_t color)
+static int16_t drawValue(int16_t x, int16_t y, const char* v, uint16_t color)
 {
   const char* unit = VALUE_UNIT;
   if (*v && *unit)
@@ -437,7 +439,7 @@ static void drawValue(int16_t x, int16_t y, const char* v, uint16_t color)
     if (textWidth(buf) > VALUE_W) snprintf(buf, sizeof(buf), "%s%c", v, unit[0]);
     if (textWidth(buf) <= VALUE_W) return drawText(x, y, buf, VALUE_W, color);
   }
-  drawText(x, y, v, VALUE_W, color);
+  return drawText(x, y, v, VALUE_W, color);
 }
 
 // 11x9 drive
@@ -461,14 +463,35 @@ static uint16_t barColor(uint8_t pct, uint16_t low)
   return pct >= BAR_CRIT_PCT ? GxEPD_RED : pct >= BAR_WARN_PCT ? GxEPD_YELLOW : low;
 }
 
-static void drawRowContent(const Entry& e, int16_t y0, uint16_t titleColor, uint16_t color)
+// ends (optional) receives the x just past name, ip, disk value and ram value
+static void drawRowContent(const Entry& e, int16_t y0, uint16_t titleColor, uint16_t color, int16_t* ends = nullptr)
 {
-  drawText(TEXT_X, y0 + ROW1_DY, e.name, TEXT_W, titleColor);
-  drawText(TEXT_X, y0 + ROW2_DY, e.ip, TEXT_W, color);
+  int16_t e0 = drawText(TEXT_X, y0 + ROW1_DY, e.name, TEXT_W, titleColor);
+  int16_t e1 = drawText(TEXT_X, y0 + ROW2_DY, e.ip, TEXT_W, color);
   drawDiskIcon(ICON_X, y0 + ROW1_DY, color);
-  drawValue(VALUE_X, y0 + ROW1_DY, e.disk, color);
+  int16_t e2 = drawValue(VALUE_X, y0 + ROW1_DY, e.disk, color);
   drawRamIcon(ICON_X, y0 + ROW2_DY, color);
-  drawValue(VALUE_X, y0 + ROW2_DY, e.ram, color);
+  int16_t e3 = drawValue(VALUE_X, y0 + ROW2_DY, e.ram, color);
+  if (ends)
+  {
+    ends[0] = e0;
+    ends[1] = e1;
+    ends[2] = e2;
+    ends[3] = e3;
+  }
+}
+
+// true if (x, dy) lies on a text row next to drawn content, with a 1 px margin
+static bool onContent(int16_t x, int16_t dy, const int16_t* ends)
+{
+  for (uint8_t row = 0; row < 2; row++)
+  {
+    int16_t top = row ? ROW2_DY : ROW1_DY;
+    if ((dy < top - 1) || (dy > top + 8)) continue;
+    if ((x >= TEXT_X - 1) && (x <= ends[row])) return true;
+    if ((x >= ICON_X - 1) && (x <= ends[row + 2])) return true;
+  }
+  return false;
 }
 
 static void drawHeader(const Entry& e)
@@ -482,22 +505,22 @@ static void drawCard(uint8_t i, const Entry& e)
 {
   if (!e.used) return;
   int16_t y0 = (i + 1) * SLOT_H;
-  uint16_t color = GxEPD_BLACK;
-  if (e.online) display.fillRoundRect(CARD_X, y0, CARD_W, CARD_H, CARD_R, GxEPD_WHITE);
-  else
+  display.fillRoundRect(CARD_X, y0, CARD_W, CARD_H, CARD_R, GxEPD_WHITE);
+  int16_t ends[4];
+  drawRowContent(e, y0, GxEPD_BLACK, GxEPD_BLACK, ends);
+  if (!e.online)
   {
-    // no grey on this panel: dark grey is a 75% black dither (one white pixel per 2x2), with white content;
-    // dots stay 2 px inside the edge so none land outside the rounded corners
-    display.fillRoundRect(CARD_X, y0, CARD_W, CARD_H, CARD_R, GxEPD_BLACK);
-    for (int16_t y = y0 + 2; y < y0 + CARD_H - 2; y += 2)
+    // offline: evenly spaced solid diagonals ('/', 2 px thick, 6 px apart), broken around text and icons
+    for (int16_t dy = 2; dy < CARD_H - 2; dy++)
     {
-      for (int16_t x = CARD_X + 2; x < CARD_X + CARD_W - 2; x += 2) display.drawPixel(x, y, GxEPD_WHITE);
+      for (int16_t x = CARD_X + 2; x < CARD_X + CARD_W - 2; x++)
+      {
+        if (((x + dy) % 6 < 2) && !onContent(x, dy, ends)) display.drawPixel(x, y0 + dy, GxEPD_BLACK);
+      }
     }
-    color = GxEPD_WHITE;
   }
-  drawRowContent(e, y0, color, color);
   int16_t w = int32_t(CARD_W - 4) * e.bar / 100;
-  if (w > 0) display.fillRect(CARD_X + 2, y0 + BAR_DY, w, BAR_H, barColor(e.bar, color));
+  if (w > 0) display.fillRect(CARD_X + 2, y0 + BAR_DY, w, BAR_H, barColor(e.bar, GxEPD_BLACK));
 }
 
 static void drawPageIndicator(uint8_t page, uint8_t pages)
