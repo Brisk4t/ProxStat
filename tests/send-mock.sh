@@ -89,6 +89,11 @@ for (( i = 0; i < count; i++ )); do
 done
 
 reply="$(timeout 0.5 cat <&3 || true)"
+reply="${reply//$'\r'/}"
 [[ -n "$reply" ]] && printf '%s\n' "$reply"
-echo "Sent $sent line(s) to $port"
+# one reply per line: OK, ERR <reason> or VER ...; anything else is debug output
+acks=$(grep -cE '^(OK|ERR |VER )' <<<"$reply" || true)
+errs=$(grep -c '^ERR ' <<<"$reply" || true)
+echo "Sent $sent line(s) to $port, $acks acked, $errs error(s)"
 exec 3>&-
+(( acks == sent && errs == 0 ))

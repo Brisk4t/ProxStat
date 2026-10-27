@@ -1,8 +1,9 @@
 // StatMonitorEPD: host + container status list on a 1.54" 152x152 4-color e-paper
 // (black/white/yellow/red, GxEPD2_154c_152 driver in /lib).
 //
-// Layout: a header row (the host) and 4 cards per page, 12 cards max (3 pages).
-// A button on BUTTON_PIN (active low) steps to the next page and wraps around.
+// Layout: a header row (the host) and ITEMS_PER_PAGE cards per page (1..4, default 4), 12 cards max.
+// Fewer cards per page make each card taller. A button on BUTTON_PIN (active low) steps to the
+// next page and wraps around.
 //
 // Serial protocol: one command per line ('\n' or "\r\n"), max 127 chars.
 //   H|n=Proxmox:|ip=192.168.1.254|d=120/512|r=12/64|b=72        header row
@@ -12,7 +13,11 @@
 //   clear                   remove all items
 //   next                    same as a button press
 //   page=2                  jump to page 2
+//   rot=1                   draw rotation in 90 degree steps: 0, 1, 2, 3 or -1 (= 3); full refresh.
+//                           Not saved, EPD_ROTATION applies again after a reset
 //   full                    full refresh now
+//   ver                     protocol version and limits:
+//                           "VER 1 items=12 per_page=4 n=15 ip=15 d=11 r=11 line=127"
 // Fields:
 //   n   name (header: title, drawn in yellow)
 //   ip  second text line
@@ -20,7 +25,9 @@
 //   r   ram "used/total", same format
 //   b   bar 0..100 %: black/white below BAR_WARN_PCT, yellow below BAR_CRIT_PCT, red above
 //   on  0 = offline (diagonal lines across the card, broken around the text), 1 = online
-// Only malformed lines get a reply ("ERR ...").
+// Every non-empty line gets exactly one reply, in order: "OK", "ERR <reason>" or (for ver) the VER
+// line. OK means the line was applied to the model, not that it is on screen yet. A line with a bad
+// field still applies its good fields and replies with the first error.
 //
 // Updates: every change marks its section (name, ip, disk, ram, bar or whole card) stale. Once
 // stale data has waited UPDATE_HOLDOFF_MS, the bounding box of all stale sections is redrawn
@@ -37,7 +44,8 @@
 //   EPD_ABORT_MS        cut partial refreshes short after this many ms, 0 = off (see driver)
 //   EPD_PAGE_HEIGHT     rows per drawing page (default 38 on STM32 = 1444 B, full frame elsewhere)
 //   EPD_SPI_HZ          SPI clock (default 10 MHz)
-//   EPD_ROTATION        draw rotation in 90 degree steps clockwise: 0, 1, 2, -1 (= 270)
+//   EPD_ROTATION        rotation at boot in 90 degree steps clockwise: 0, 1, 2, -1 (= 270); "rot=" changes it
+//   ITEMS_PER_PAGE      cards per page, 1..4 (default 4); card height scales to fill the screen
 //   FULL_REFRESH_HOURS  full refresh interval (default 12, fractions allowed)
 //   UPDATE_HOLDOFF_MS   batch window before a partial refresh (default 300)
 //   BAR_WARN_PCT, BAR_CRIT_PCT  bar color thresholds (default 50, 80)
@@ -72,6 +80,12 @@
 #endif
 #ifndef EPD_ROTATION
 #define EPD_ROTATION 0
+#endif
+#ifndef ITEMS_PER_PAGE
+#define ITEMS_PER_PAGE 4
+#endif
+#if (ITEMS_PER_PAGE < 1) || (ITEMS_PER_PAGE > 4)
+#error "ITEMS_PER_PAGE must be 1..4"
 #endif
 #ifndef FULL_REFRESH_HOURS
 #define FULL_REFRESH_HOURS 12
@@ -109,33 +123,62 @@ static const uint32_t FULL_REFRESH_MS = uint32_t(FULL_REFRESH_HOURS * 3600000UL)
 static const uint32_t BUTTON_DEBOUNCE_MS = 30;
 
 // ---------------------------------------------------------------- layout (152x152)
-// slot 0 is the header, slots 1..4 the cards; each slot is 30 rows incl. a 3 row gap
+// slot 0 is the header (30 rows), slots 1..ITEMS_PER_PAGE the cards, which split the rows down to
+// the page indicator evenly (30, 40, 60 or 120 rows); every slot ends in a 3 row gap
 static const int16_t SCREEN_W = 152;
-static const int16_t SLOT_H = 30;
-static const int16_t CARD_X = 1, CARD_W = 150, CARD_H = 27, CARD_R = 3;
-static const int16_t ROW1_DY = 3, ROW2_DY = 13; // 8 px text rows
-static const int16_t BAR_DY = 23, BAR_H = 2;
+static const int16_t HEADER_H = 30;
+static const int16_t CARD_SLOT_H = ((SCREEN_W - HEADER_H - 2) / ITEMS_PER_PAGE) & ~1;
+static const int16_t CARD_X = 1, CARD_W = 150, CARD_H = CARD_SLOT_H - 3, CARD_R = 3;
 static const int16_t TEXT_X = 3, TEXT_W = 81;   // name / ip column, 3..83
 static const int16_t ICON_X = 85;               // 12 px icons, 85..96
 static const int16_t VALUE_X = 98, VALUE_W = 51; // 98..148
 static const int16_t INDICATOR_Y = 148, INDICATOR_H = 2;
 
-// sections of a slot that can go stale independently; rects relative to the slot top,
-// x aligned to 4 and y/h to 2 (smallest partial window of the panel is 4x2)
+// vertical layout within a slot: two 8 px text rows and the usage bar below them
+struct RowLayout { int16_t row1, row2, barY, barH; };
+static const RowLayout HEADER_LAYOUT = { 3, 13, 23, 2 };
+// cards: the bar thickens with the card (2, 2, 4, 8 px) and sits 2 rows above its bottom edge;
+// the rows above the bar split into top margin, row gap and bottom margin (3, 2, 2 at 4 per page)
+static const int16_t CARD_BAR_H = (CARD_H / 14 > 2) ? (CARD_H / 14) & ~1 : 2;
+static const int16_t CARD_BAR_Y = CARD_H - 2 - CARD_BAR_H;
+static const int16_t CARD_ROW_GAP = (CARD_BAR_Y - 16) / 3;
+static const int16_t CARD_ROW1 = (CARD_BAR_Y - 16 - CARD_ROW_GAP + 1) / 2;
+static const RowLayout CARD_LAYOUT = { CARD_ROW1, int16_t(CARD_ROW1 + 8 + CARD_ROW_GAP), CARD_BAR_Y, CARD_BAR_H };
+
+// sections of a slot that can go stale independently
 enum : uint8_t { SEC_NAME = 0x01, SEC_IP = 0x02, SEC_DISK = 0x04, SEC_RAM = 0x08, SEC_BAR = 0x10, SEC_CARD = 0x20 };
+static const uint8_t SEC_COUNT = 6;
 struct Rect { int16_t x, y, w, h; };
-static const Rect SECTION_RECTS[] = {
-  {  0,  2,  84, 10 }, // SEC_NAME
-  {  0, 12,  84, 10 }, // SEC_IP
-  { 84,  2,  68, 10 }, // SEC_DISK
-  { 84, 12,  68, 10 }, // SEC_RAM
-  {  0, 22, 152,  4 }, // SEC_BAR
-  {  0,  0, 152, 30 }, // SEC_CARD
-};
 static const Rect INDICATOR_RECT = { 0, 146, 152, 6 };
 
+static int16_t slotY(uint8_t slot)
+{
+  return slot ? HEADER_H + (slot - 1) * CARD_SLOT_H : 0;
+}
+
+static const RowLayout& layoutOf(uint8_t slot)
+{
+  return slot ? CARD_LAYOUT : HEADER_LAYOUT;
+}
+
+// section rect relative to the slot top, 1 px around the text rows / bar; render() aligns the
+// union to the panel's 4x2 partial window grid
+static Rect sectionRect(uint8_t slot, uint8_t sec)
+{
+  const RowLayout& l = layoutOf(slot);
+  switch (sec)
+  {
+    case SEC_NAME: return { 0, int16_t(l.row1 - 1), 84, 10 };
+    case SEC_IP: return { 0, int16_t(l.row2 - 1), 84, 10 };
+    case SEC_DISK: return { 84, int16_t(l.row1 - 1), 68, 10 };
+    case SEC_RAM: return { 84, int16_t(l.row2 - 1), 68, 10 };
+    case SEC_BAR: return { 0, int16_t(l.barY - 1), SCREEN_W, int16_t(l.barH + 2) };
+    default: return { 0, 0, SCREEN_W, slot ? CARD_SLOT_H : HEADER_H }; // SEC_CARD
+  }
+}
+
 // ---------------------------------------------------------------- model
-static const uint8_t ITEM_COUNT = 12, ITEMS_PER_PAGE = 4, SLOT_COUNT = ITEMS_PER_PAGE + 1;
+static const uint8_t ITEM_COUNT = 12, SLOT_COUNT = ITEMS_PER_PAGE + 1;
 
 struct Entry
 {
@@ -157,6 +200,7 @@ static bool g_staleIndicator;
 static bool g_fullPending = true;
 static uint32_t g_staleSince;
 static uint32_t g_lastFull;
+static uint8_t g_rotation = ((EPD_ROTATION % 4) + 4) % 4; // -1 -> 3
 
 // snapshot drawn by the page loop; serial updates during busy waits only touch the live model
 struct Scene
@@ -167,10 +211,30 @@ struct Scene
 };
 static Scene g_scene;
 
-static void reply(const char* msg)
+static const uint8_t PROTOCOL_VERSION = 1;
+static char g_line[128];
+static uint8_t g_lineLen;
+static bool g_lineOverflow;
+
+// the one reply per line: OK, or ERR with the reason
+static void reply(const char* err)
 {
+  if (!err)
+  {
+    Serial.println("OK");
+    return;
+  }
   Serial.print("ERR ");
-  Serial.println(msg);
+  Serial.println(err);
+}
+
+static void replyVersion()
+{
+  char buf[80];
+  snprintf(buf, sizeof(buf), "VER %d items=%d per_page=%d n=%d ip=%d d=%d r=%d line=%d", PROTOCOL_VERSION, ITEM_COUNT,
+           ITEMS_PER_PAGE, int(sizeof(g_header.name) - 1), int(sizeof(g_header.ip) - 1), int(sizeof(g_header.disk) - 1),
+           int(sizeof(g_header.ram) - 1), int(sizeof(g_line) - 1));
+  Serial.println(buf);
 }
 
 static void resetEntry(Entry& e)
@@ -246,8 +310,8 @@ static bool copyIfChanged(char* dst, size_t size, const char* src)
 }
 
 // ---------------------------------------------------------------- serial
-// idx -1 = header, fields = "k=v|k=v..." or "del"
-static void applyEntry(int8_t idx, char* fields)
+// idx -1 = header, fields = "k=v|k=v..." or "del"; returns the first error, nullptr if none
+static const char* applyEntry(int8_t idx, char* fields)
 {
   Entry& e = idx < 0 ? g_header : g_items[idx];
   int8_t slot = idx < 0 ? 0 : slotOf(idx);
@@ -255,7 +319,7 @@ static void applyEntry(int8_t idx, char* fields)
   if (strcmp(fields, "del") == 0)
   {
     if (idx < 0) resetHeader();
-    else if (!e.used) return;
+    else if (!e.used) return nullptr;
     else resetEntry(e);
     if (slot >= 0) markStale(slot, SEC_CARD);
     uint8_t pages = pageCount();
@@ -264,8 +328,9 @@ static void applyEntry(int8_t idx, char* fields)
       markIndicatorStale();
       if (g_page >= pages) setPage(pages - 1);
     }
-    return;
+    return nullptr;
   }
+  const char* err = nullptr;
   uint8_t changed = 0;
   if ((idx >= 0) && !e.used)
   {
@@ -278,7 +343,7 @@ static void applyEntry(int8_t idx, char* fields)
     char* eq = strchr(tok, '=');
     if (!eq)
     {
-      reply("field without '='");
+      if (!err) err = "field without '='";
       continue;
     }
     *eq = 0;
@@ -297,12 +362,14 @@ static void applyEntry(int8_t idx, char* fields)
       bool on = atoi(val) != 0;
       if (on != e.online) { e.online = on; changed |= SEC_CARD; } // background changes
     }
-    else reply("unknown field");
+    else if (!err) err = "unknown field";
   }
   if (changed && (slot >= 0)) markStale(slot, changed);
+  return err;
 }
 
-static void handleLine(char* line)
+// returns the error, nullptr on success
+static const char* execLine(char* line)
 {
   if (strcmp(line, "clear") == 0)
   {
@@ -316,31 +383,38 @@ static void handleLine(char* line)
   else if (strncmp(line, "page=", 5) == 0)
   {
     int p = atoi(line + 5);
-    if ((p >= 1) && (p <= pageCount())) setPage(p - 1);
-    else reply("no such page");
+    if ((p < 1) || (p > pageCount())) return "no such page";
+    setPage(p - 1);
+  }
+  else if (strncmp(line, "rot=", 4) == 0)
+  {
+    int r = atoi(line + 4);
+    if ((r < -1) || (r > 3)) return "rotation must be -1..3";
+    if (uint8_t((r + 4) % 4) != g_rotation)
+    {
+      // applied by the next render, never mid-frame; everything moves, so redraw it all
+      g_rotation = (r + 4) % 4;
+      g_fullPending = true;
+    }
   }
   else
   {
     char* sep = strchr(line, '|');
-    if (!sep)
-    {
-      reply("unknown command");
-      return;
-    }
+    if (!sep) return "unknown command";
     *sep = 0;
-    if ((strcmp(line, "H") == 0) || (strcmp(line, "h") == 0)) applyEntry(-1, sep + 1);
-    else
-    {
-      int n = atoi(line);
-      if ((n < 1) || (n > ITEM_COUNT)) reply("item must be H or 1..12");
-      else applyEntry(n - 1, sep + 1);
-    }
+    if ((strcmp(line, "H") == 0) || (strcmp(line, "h") == 0)) return applyEntry(-1, sep + 1);
+    int n = atoi(line);
+    if ((n < 1) || (n > ITEM_COUNT)) return "item must be H or 1..12";
+    return applyEntry(n - 1, sep + 1);
   }
+  return nullptr;
 }
 
-static char g_line[128];
-static uint8_t g_lineLen;
-static bool g_lineOverflow;
+static void handleLine(char* line)
+{
+  if (strcmp(line, "ver") == 0) replyVersion();
+  else reply(execLine(line));
+}
 
 static void pollSerial()
 {
@@ -464,14 +538,14 @@ static uint16_t barColor(uint8_t pct, uint16_t low)
 }
 
 // ends (optional) receives the x just past name, ip, disk value and ram value
-static void drawRowContent(const Entry& e, int16_t y0, uint16_t titleColor, uint16_t color, int16_t* ends = nullptr)
+static void drawRowContent(const Entry& e, int16_t y0, const RowLayout& l, uint16_t titleColor, uint16_t color, int16_t* ends = nullptr)
 {
-  int16_t e0 = drawText(TEXT_X, y0 + ROW1_DY, e.name, TEXT_W, titleColor);
-  int16_t e1 = drawText(TEXT_X, y0 + ROW2_DY, e.ip, TEXT_W, color);
-  drawDiskIcon(ICON_X, y0 + ROW1_DY, color);
-  int16_t e2 = drawValue(VALUE_X, y0 + ROW1_DY, e.disk, color);
-  drawRamIcon(ICON_X, y0 + ROW2_DY, color);
-  int16_t e3 = drawValue(VALUE_X, y0 + ROW2_DY, e.ram, color);
+  int16_t e0 = drawText(TEXT_X, y0 + l.row1, e.name, TEXT_W, titleColor);
+  int16_t e1 = drawText(TEXT_X, y0 + l.row2, e.ip, TEXT_W, color);
+  drawDiskIcon(ICON_X, y0 + l.row1, color);
+  int16_t e2 = drawValue(VALUE_X, y0 + l.row1, e.disk, color);
+  drawRamIcon(ICON_X, y0 + l.row2, color);
+  int16_t e3 = drawValue(VALUE_X, y0 + l.row2, e.ram, color);
   if (ends)
   {
     ends[0] = e0;
@@ -481,12 +555,12 @@ static void drawRowContent(const Entry& e, int16_t y0, uint16_t titleColor, uint
   }
 }
 
-// true if (x, dy) lies on a text row next to drawn content, with a 1 px margin
+// true if (x, dy) lies on a card text row next to drawn content, with a 1 px margin
 static bool onContent(int16_t x, int16_t dy, const int16_t* ends)
 {
   for (uint8_t row = 0; row < 2; row++)
   {
-    int16_t top = row ? ROW2_DY : ROW1_DY;
+    int16_t top = row ? CARD_LAYOUT.row2 : CARD_LAYOUT.row1;
     if ((dy < top - 1) || (dy > top + 8)) continue;
     if ((x >= TEXT_X - 1) && (x <= ends[row])) return true;
     if ((x >= ICON_X - 1) && (x <= ends[row + 2])) return true;
@@ -496,18 +570,18 @@ static bool onContent(int16_t x, int16_t dy, const int16_t* ends)
 
 static void drawHeader(const Entry& e)
 {
-  drawRowContent(e, 0, GxEPD_YELLOW, GxEPD_WHITE);
+  drawRowContent(e, 0, HEADER_LAYOUT, GxEPD_YELLOW, GxEPD_WHITE);
   int16_t w = int32_t(SCREEN_W) * e.bar / 100;
-  if (w > 0) display.fillRect(0, BAR_DY, w, BAR_H, barColor(e.bar, GxEPD_WHITE));
+  if (w > 0) display.fillRect(0, HEADER_LAYOUT.barY, w, HEADER_LAYOUT.barH, barColor(e.bar, GxEPD_WHITE));
 }
 
 static void drawCard(uint8_t i, const Entry& e)
 {
   if (!e.used) return;
-  int16_t y0 = (i + 1) * SLOT_H;
+  int16_t y0 = slotY(i + 1);
   display.fillRoundRect(CARD_X, y0, CARD_W, CARD_H, CARD_R, GxEPD_WHITE);
   int16_t ends[4];
-  drawRowContent(e, y0, GxEPD_BLACK, GxEPD_BLACK, ends);
+  drawRowContent(e, y0, CARD_LAYOUT, GxEPD_BLACK, GxEPD_BLACK, ends);
   if (!e.online)
   {
     // offline: evenly spaced solid diagonals ('/', 2 px thick, 6 px apart), broken around text and icons
@@ -520,13 +594,15 @@ static void drawCard(uint8_t i, const Entry& e)
     }
   }
   int16_t w = int32_t(CARD_W - 4) * e.bar / 100;
-  if (w > 0) display.fillRect(CARD_X + 2, y0 + BAR_DY, w, BAR_H, barColor(e.bar, GxEPD_BLACK));
+  if (w > 0) display.fillRect(CARD_X + 2, y0 + CARD_LAYOUT.barY, w, CARD_LAYOUT.barH, barColor(e.bar, GxEPD_BLACK));
 }
 
 static void drawPageIndicator(uint8_t page, uint8_t pages)
 {
   if (pages < 2) return;
-  const int16_t dash = 10, gap = 4;
+  const int16_t gap = 4;
+  int16_t dash = (SCREEN_W - 8 - (pages - 1) * gap) / pages; // shrinks so 12 pages (1 per page) still fit
+  if (dash > 10) dash = 10;
   int16_t x = (SCREEN_W - (pages * dash + (pages - 1) * gap)) / 2;
   for (uint8_t p = 0; p < pages; p++, x += dash + gap)
   {
@@ -554,6 +630,7 @@ static void unionRect(int16_t& x0, int16_t& y0, int16_t& x1, int16_t& y1, const 
 
 static void render(bool full)
 {
+  display.setRotation(g_rotation);
   g_scene.header = g_header;
   for (uint8_t i = 0; i < ITEMS_PER_PAGE; i++) g_scene.items[i] = g_items[g_page * ITEMS_PER_PAGE + i];
   g_scene.page = g_page;
@@ -563,9 +640,9 @@ static void render(bool full)
   int16_t x0 = SCREEN_W, y0 = SCREEN_W, x1 = 0, y1 = 0;
   for (uint8_t s = 0; s < SLOT_COUNT; s++)
   {
-    for (uint8_t b = 0; b < sizeof(SECTION_RECTS) / sizeof(SECTION_RECTS[0]); b++)
+    for (uint8_t b = 0; b < SEC_COUNT; b++)
     {
-      if (g_stale[s] & (1 << b)) unionRect(x0, y0, x1, y1, SECTION_RECTS[b], s * SLOT_H);
+      if (g_stale[s] & (1 << b)) unionRect(x0, y0, x1, y1, sectionRect(s, 1 << b), slotY(s));
     }
     g_stale[s] = 0;
   }
@@ -671,7 +748,7 @@ void setup()
   display.epd2.setFastTemperature(uint8_t(int8_t(EPD_TEMPERATURE)));
 #endif
   display.epd2.setAbortMs(EPD_ABORT_MS);
-  display.setRotation(((EPD_ROTATION % 4) + 4) % 4); // -1 -> 3
+  // rotation is set by render() from g_rotation
 }
 
 void loop()

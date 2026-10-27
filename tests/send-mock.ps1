@@ -49,6 +49,7 @@ $sp = New-Object System.IO.Ports.SerialPort $Port, $Baud, 'None', 8, 'One'
 $sp.DtrEnable = $true # USB CDC on the Blue Pill / ESP32 only delivers data once DTR is set
 $sp.NewLine = "`n"
 $sent = 0
+$replies = ''
 try {
   $sp.Open()
   for ($i = 0; $i -lt $Count; $i++) {
@@ -59,13 +60,17 @@ try {
       $sent++
       Start-Sleep -Milliseconds ([Math]::Max(20, $IntervalMs))
       $reply = $sp.ReadExisting()
-      if ($reply) { Write-Host $reply.TrimEnd() }
+      if ($reply) { Write-Host $reply.TrimEnd(); $replies += $reply }
     }
   }
   Start-Sleep -Milliseconds $ReplyMs
   $reply = $sp.ReadExisting()
-  if ($reply) { Write-Host $reply.TrimEnd() }
-  Write-Host "Sent $sent line(s) to $Port"
+  if ($reply) { Write-Host $reply.TrimEnd(); $replies += $reply }
+  # one reply per line: OK, ERR <reason> or VER ...; anything else is debug output
+  $acks = @($replies -split "`r?`n" | Where-Object { $_ -match '^(OK|ERR |VER )' })
+  $errs = @($acks | Where-Object { $_ -like 'ERR *' }).Count
+  $summary = "Sent $sent line(s) to $Port, $($acks.Count) acked, $errs error(s)"
+  if (($acks.Count -ne $sent) -or $errs) { Write-Warning $summary } else { Write-Host $summary }
 }
 finally {
   $sp.Close()
