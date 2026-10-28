@@ -1,17 +1,23 @@
 # ProxStat EPaper
 
-Shows a host and up to 12 containers or VMs on a 1.54" 152×152 4-color e-paper panel (black, white, yellow, red). Data arrives over USB serial from `proxstat`, a driver that runs on the Proxmox node (see [Usage](#usage)). Only the parts of the screen that changed get redrawn.
+Shows a Proxmox host and up to 12 of its containers or VMs on a 1.54" 152×152 4-color e-paper panel (black, white, yellow, red). The project has two parts:
 
-- One header row (the host) and 1–4 list items per page (set with the `per_page=N` command; default 4, or `ITEMS_PER_PAGE`), up to 12 items. With fewer items per page, each card is taller.
+- **Firmware** for the board driving the panel, in [firmware/](firmware). It takes the data over USB serial and redraws only the parts of the screen that changed.
+- **`proxstat`**, a driver that runs on the Proxmox node, in [go/](go). It reads the cluster, sends the display what changed, and keeps its settings, since the board has no flash (see [Usage](#usage)).
+
+On the display:
+
+- One header row (the host) and 1–4 list items per page (`proxstat set per-page`, default 4), up to 12 items. With fewer items per page, each card is taller.
 - A button steps to the next page and wraps around after the last one.
 - Each item shows a name, an IP, disk and RAM usage, and a usage bar. Offline items are drawn with diagonal lines.
+- Text and background colors can be set per field (see [Colors](#colors)).
 - Each change marks only its section stale (name, IP, disk, RAM or bar). All stale sections are drawn in one partial refresh.
 - Serial input keeps being read while the panel refreshes (12–25 s), so the host never blocks.
 - A full refresh runs every 12 hours to clear ghosting and prevent burn-in.
 
 Supported boards: STM32F103 Blue Pill, ESP32-C3 SuperMini, ESP32-S3. The panel driver is in [firmware/lib/GxEPD2_154c_152](firmware/lib/GxEPD2_154c_152).
 
-## Building
+## Building the firmware
 
 The PlatformIO project lives in [firmware/](firmware). From the repo root:
 
@@ -81,7 +87,8 @@ After replacing the binary, restart the daemon with `proxstat stop` and `proxsta
 | `proxstat refresh` | Read Proxmox and send the changes now. |
 | `proxstat next` | Show the next page, same as pressing the button. |
 | `proxstat status` | Show the settings, the config and log locations, and the daemon's state: connected port, last update, last error. |
-| `proxstat set <setting> <value>` | Change a setting (see below). It's saved, and applied right away. |
+| `proxstat set <setting> <value>` | Change a setting (see [Settings](#settings)). It's saved, and applied right away. |
+| `proxstat set header\|list <kind> <field> <color>` | Change a color (see [Colors](#colors)). Saved and applied the same way. |
 
 ### Settings
 
@@ -93,6 +100,16 @@ After replacing the binary, restart the daemon with `proxstat stop` and `proxsta
 | `redraw-interval` | hours, fractions allowed | `12` | How often the daemon runs a full refresh against ghosting. `0` turns it off. The firmware also runs its own every `FULL_REFRESH_HOURS`. |
 | `vid` | 4 hex digits | `B00B` | USB vendor id of the display. |
 | `pid` | 4 hex digits | `6969` | USB product id of the display. |
+
+For example:
+
+```sh
+proxstat set per-page 2
+proxstat set rotate 1
+proxstat set update-interval 5
+```
+
+Settings are saved in `config.json` in the user's config directory, which is `/root/.config/proxstat/` when run as root. The daemon logs to `daemon.log` in the user's cache directory (`/root/.cache/proxstat/`), and the log is never rotated.
 
 ### Colors
 
@@ -111,16 +128,6 @@ proxstat set list background-color name red
 proxstat set list text-color name white
 proxstat set header text-color name white
 ```
-
-For example:
-
-```sh
-proxstat set per-page 2
-proxstat set rotate 1
-proxstat set update-interval 5
-```
-
-Settings are saved in `config.json` in the user's config directory, which is `/root/.config/proxstat/` when run as root. The daemon logs to `daemon.log` in the user's cache directory (`/root/.cache/proxstat/`), and the log is never rotated.
 
 ### What's shown
 
@@ -179,7 +186,7 @@ These go in the `[epd]` section of [firmware/platformio.ini](firmware/platformio
 
 The screen is only 152 px wide, so the two-column grid can't hold 2x text: a 2x IP address alone needs up to 160 px. Bigger text therefore needs fewer columns. At 3 per page there isn't room for two 2x rows, so the text stays 1x.
 
-When a value is too wide for its scale, it drops to the next smaller scale and stays vertically centered in its row. The name at 2 per page is the exception: it stays at 2x and is cut short with `...`. For example, `192.168.100.200` is drawn at 1x on a 2x row, and a long name at 2x on the 3x row. For disk and RAM, the unit is shortened first (`GB` → `G`), and the scale drops only if that doesn't help.
+When a value is too wide for its scale, it drops to the next smaller scale and stays vertically centered in its row. For example, `192.168.100.200` is drawn at 1x on a 2x row, and a long name at 2x on the 3x row. For disk and RAM, the unit is shortened first (`GB` → `G`), and the scale drops only if that doesn't help. The name at 2 per page is the exception: it stays at 2x and is cut short with `...`.
 
 ## Serial protocol
 
@@ -209,7 +216,7 @@ With `EPD_DEBUG` on, debug lines are mixed in with the replies. Debug lines neve
 
 | Key | Value | Example | Shown as |
 |---|---|---|---|
-| `n` | name, up to 24 characters (yellow in the header). The header and 3–4 per page show about 13, 2 per page 12 before cutting with `...`, 1 per page all 24 at 1x | `n=Container 1` | first line, left |
+| `n` | name, up to 24 characters (yellow in the header by default). The header and 3–4 per page show about 13, 2 per page 12 before cutting with `...`, 1 per page all 24 at 1x | `n=Container 1` | first line, left |
 | `ip` | second line, up to 15 characters | `ip=192.168.1.123` | second line, left |
 | `d` | disk `used/total`, up to 11 characters | `d=12/256` | `12/256 GB` next to the drive icon |
 | `r` | RAM `used/total`, up to 11 characters | `r=3.1/8` | `3.1/8 GB` next to the RAM icon |
@@ -249,7 +256,7 @@ H|n=Proxmox:|ip=192.168.1.254|d=412/931|r=27/64|b=86
 
 [firmware/tests/](firmware/tests) holds two scripts that send mock data: [send-mock.ps1](firmware/tests/send-mock.ps1) for Windows PowerShell and [send-mock.sh](firmware/tests/send-mock.sh) for bash or Git Bash. With no test mode, they send [mock-data.txt](firmware/tests/mock-data.txt): a header, 4 items on page 1 (one of them offline), and 2 items on page 2 that test the longest IP and value shortening.
 
-Close any serial monitor on the port first, or the scripts can't open it.
+The scripts talk to the board directly, without the driver. Stop the daemon (`proxstat stop`) and close any serial monitor on the port first, or the scripts can't open it.
 
 | Test | Sends | Expected refresh |
 |---|---|---|
