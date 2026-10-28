@@ -63,12 +63,12 @@ These go in the `[epd]` section of [firmware/platformio.ini](firmware/platformio
 |---|---|---|---|---|
 | 4 | 27 px | name and IP on the left, disk and RAM on the right | 1x | 2 px |
 | 3 | 37 px | same grid, more spacing | 1x | 2 px |
-| 2 | 57 px | name, then IP, each across the card; disk and RAM side by side below | 2x name and IP, 1x disk and RAM | 4 px |
+| 2 | 57 px | name, then IP, each across the card; disk and RAM side by side below | 2x name (a name over 12 characters is cut with `...`) and IP, 1x disk and RAM | 4 px |
 | 1 | 117 px | one field per row | 3x name, 2x the rest | 8 px |
 
 The screen is only 152 px wide, so the two-column grid can't hold 2x text: a 2x IP address alone needs up to 160 px. Bigger text therefore needs fewer columns. At 3 per page there isn't room for two 2x rows, so the text stays 1x.
 
-When a value is too wide for its scale, it drops to the next smaller scale and stays vertically centered in its row. For example, `192.168.100.200` is drawn at 1x on a 2x row, and a long name at 2x on the 3x row. For disk and RAM, the unit is shortened first (`GB` → `G`), and the scale drops only if that doesn't help.
+When a value is too wide for its scale, it drops to the next smaller scale and stays vertically centered in its row. The name at 2 per page is the exception: it stays at 2x and is cut short with `...`. For example, `192.168.100.200` is drawn at 1x on a 2x row, and a long name at 2x on the 3x row. For disk and RAM, the unit is shortened first (`GB` → `G`), and the scale drops only if that doesn't help.
 
 ## Serial protocol
 
@@ -98,7 +98,7 @@ With `EPD_DEBUG` on, debug lines are mixed in with the replies. Debug lines neve
 
 | Key | Value | Example | Shown as |
 |---|---|---|---|
-| `n` | name, up to 15 characters (yellow in the header) | `n=Container 1` | first line, left |
+| `n` | name, up to 24 characters (yellow in the header). The header and 3–4 per page show about 13, 2 per page 12 before cutting with `...`, 1 per page all 24 at 1x | `n=Container 1` | first line, left |
 | `ip` | second line, up to 15 characters | `ip=192.168.1.123` | second line, left |
 | `d` | disk `used/total`, up to 11 characters | `d=12/256` | `12/256 GB` next to the drive icon |
 | `r` | RAM `used/total`, up to 11 characters | `r=3.1/8` | `3.1/8 GB` next to the RAM icon |
@@ -120,7 +120,7 @@ Each field redraws only its own section of the screen. Changing `on`, or setting
 | `rot=1` | Rotate the drawing: `0`, `1`, `2`, `3`, or `-1` (same as `3`), in 90° steps clockwise. Triggers a full refresh. Not saved: after a reset, `EPD_ROTATION` applies again. |
 | `per_page=2` | Show 1–4 list items per page. Item numbers don't change: with 2 per page, items `1`–`2` are page 1, `3`–`4` page 2 and so on. The display stays on the page that holds the first item shown before the change. Triggers a full refresh. Not saved: after a reset, `ITEMS_PER_PAGE` applies again. |
 | `full` | Run a full refresh now. |
-| `ver` | Reply with the protocol version and limits, e.g. `VER 1 items=12 per_page=4 n=15 ip=15 d=11 r=11 line=127`: the item count, the current items per page, maximum length of each field, and maximum line length. The version goes up whenever the protocol changes in a way that isn't backward compatible. |
+| `ver` | Reply with the protocol version and limits, e.g. `VER 1 items=12 per_page=4 n=24 ip=15 d=11 r=11 line=127`: the item count, the current items per page, maximum length of each field, and maximum line length. The version goes up whenever the protocol changes in a way that isn't backward compatible. |
 
 ### Example
 

@@ -1,17 +1,12 @@
-package main
+package internal
 
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
-
-	"go.bug.st/serial"
-	"go.bug.st/serial/enumerator"
 )
-
-const DEVICE_VID = "B00B"
-const DEVICE_PID = "6969"
 
 type PVEInfo struct {
 	Name        string `json:"name"`
@@ -19,6 +14,7 @@ type PVEInfo struct {
 	Node        string `json:"node"`
 	IPAddr      string
 	Id          string  `json:"id"`
+	VMID        int     `json:"vmid"`
 	Status      string  `json:"status"`
 	MaxCpu      int     `json:"maxcpu"`
 	MaxDisk     int     `json:"maxdisk"`
@@ -28,6 +24,7 @@ type PVEInfo struct {
 	CurrentCpu  float32 `json:"cpu"`
 }
 
+// UnmarshalJSON decodes a cluster resource, using the node name as the name of a node
 func (info *PVEInfo) UnmarshalJSON(data []byte) error {
 	type pveInfo PVEInfo
 	aux := struct {
@@ -48,55 +45,7 @@ func (info *PVEInfo) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-type ListItem struct {
-	MaxDisk     float32
-	MaxRAM      float32
-	CurrentRam  float32
-	CurrentDisk float32
-	CurrentCpu  float32
-}
-
-func initSerial() (serial.Port, error) {
-	mode := &serial.Mode{
-		BaudRate: 115200,
-		Parity:   0,
-		DataBits: 8,
-		StopBits: 1,
-	}
-
-	// Get all serial ports
-	ports, err := enumerator.GetDetailedPortsList()
-	if err != nil {
-		fmt.Println("Error listing serial ports:", err)
-		return nil, err
-	}
-
-	// If no ports found
-	if len(ports) == 0 {
-		fmt.Println("No serial ports found")
-		return nil, err
-	}
-
-	// Find the port with the specified VID and PID
-	for _, port := range ports {
-		if port.IsUSB {
-			if port.VID == DEVICE_VID && port.PID == DEVICE_PID {
-
-				// Try opening the serial port
-				serialPort, err := serial.Open(port.SerialNumber, mode)
-				if err != nil {
-					fmt.Println("Error opening serial port", err)
-				}
-
-				return serialPort, nil // return the port to the parent
-			}
-		}
-	}
-
-	return nil, err
-
-}
-
+// getProxmoxHostInfo returns every node in the cluster with its IP address.
 // pvesh get /cluster/resources --type node --output-format json
 func getProxmoxHostInfo() ([]PVEInfo, error) {
 	cmd := exec.Command("pvesh", "get", "/cluster/resources", "--type", "node", "--output-format", "json")
@@ -141,6 +90,7 @@ func getProxmoxHostInfo() ([]PVEInfo, error) {
 	return hosts, nil
 }
 
+// getProxmoxVMs returns every VM and container in the cluster, with IP addresses for running ones.
 // pvesh get /cluster/resources --type vm --output-format json
 func getProxmoxVMs() ([]PVEInfo, error) {
 	cmd := exec.Command("pvesh", "get", "/cluster/resources", "--type", "vm", "--output-format", "json")
@@ -157,6 +107,10 @@ func getProxmoxVMs() ([]PVEInfo, error) {
 	}
 
 	for i := range vms {
+		// Stopped guests have no interfaces to ask about
+		if vms[i].Status != "running" {
+			continue
+		}
 		var ip string
 		switch vms[i].Type {
 		case "lxc":
@@ -164,11 +118,11 @@ func getProxmoxVMs() ([]PVEInfo, error) {
 		case "qemu":
 			ip, err = getQEMUIP(vms[i])
 		default:
-			fmt.Printf("Skipping IP lookup for unsupported Proxmox guest type %q (VM %s)\n", vms[i].Type, vms[i].Id)
+			log.Printf("Skipping IP lookup for unsupported Proxmox guest type %q (VM %s)", vms[i].Type, vms[i].Id)
 			continue
 		}
 		if err != nil {
-			fmt.Printf("Unable to get IP for %s/%s: %v\n", vms[i].Type, vms[i].Id, err)
+			log.Printf("Unable to get IP for %s/%s: %v", vms[i].Type, vms[i].Id, err)
 			continue
 		}
 		vms[i].IPAddr = ip
@@ -177,6 +131,7 @@ func getProxmoxVMs() ([]PVEInfo, error) {
 	return vms, nil
 }
 
+// getLXCIP returns the first IPv4 address of a container's non-loopback interfaces
 func getLXCIP(vm PVEInfo) (string, error) {
 	vmID := strings.TrimPrefix(vm.Id, "lxc/")
 	cmd := exec.Command(
@@ -206,6 +161,7 @@ func getLXCIP(vm PVEInfo) (string, error) {
 	return "", fmt.Errorf("no IPv4 address found for LXC %s", vm.Id)
 }
 
+// getQEMUIP returns the first IPv4 address the QEMU guest agent reports on a non-loopback interface
 func getQEMUIP(vm PVEInfo) (string, error) {
 	vmID := strings.TrimPrefix(vm.Id, "qemu/")
 	cmd := exec.Command(
@@ -242,64 +198,5 @@ func getQEMUIP(vm PVEInfo) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("no IPv4 address found for QEMU VM %d", vm.Id)
-}
-
-func main() {
-	fmt.Println("ProxStat v0.01")
-	fmt.Printf("Connecting to device with VID: %s, PID: %s \n", DEVICE_VID, DEVICE_PID)
-
-	//var serialPort, err = initSerial()
-	// if err != nil {
-	// return
-	// }
-
-	// Get the host's info
-	hostInfo, err := getProxmoxHostInfo()
-	if err != nil {
-		fmt.Println("Error getting Proxmox host info:", err)
-	}
-	fmt.Println(hostInfo)
-
-	vmInfo, err := getProxmoxVMs()
-	if err != nil {
-		fmt.Println("Error getting Proxmox VMs info:", err)
-	}
-	if err == nil {
-		fmt.Println(vmInfo)
-	}
-	// H|n=Proxmox:|ip=192.168.1.254|d=412/931|r=27/64|b=86
-
-	headerHost := hostInfo[0]
-	hostCpuUsage := int(headerHost.CurrentCpu * 100)
-	headerInfo := fmt.Sprintf(
-		"H|n=%s:|ip=%s|d=%d/%d|r=%d/%d|b=%d",
-		headerHost.Name,
-		headerHost.IPAddr,
-		(int(headerHost.CurrentDisk) / 1000000),
-		(int(headerHost.MaxDisk) / 1000000),
-		(int(headerHost.CurrentRam) / 1000000),
-		(int(headerHost.MaxRAM) / 1000000),
-		hostCpuUsage,
-	)
-
-	fmt.Println(headerInfo)
-	for idx, li := range vmInfo {
-		cpuUsage := int(li.CurrentCpu * 100)
-		listItemString := fmt.Sprintf(
-			"%d|n=%s:|ip=%s|d=%d/%d|r=%d/%d|b=%d",
-			idx,
-			li.Name,
-			li.IPAddr,
-			(int(li.CurrentDisk) / 1000000),
-			(int(li.MaxDisk) / 1000000),
-			(int(li.CurrentRam) / 1000000),
-			(int(li.MaxRAM) / 1000000),
-			cpuUsage,
-		)
-		fmt.Println(listItemString)
-	}
-
-	//serialPort.Write()
-
+	return "", fmt.Errorf("no IPv4 address found for QEMU VM %s", vm.Id)
 }

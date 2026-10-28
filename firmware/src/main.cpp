@@ -19,7 +19,7 @@
 //                           Not saved, ITEMS_PER_PAGE applies again after a reset
 //   full                   full refresh now
 //   ver                     protocol version and limits:
-//                           "VER 1 items=12 per_page=4 n=15 ip=15 d=11 r=11 line=127"
+//                           "VER 1 items=12 per_page=4 n=24 ip=15 d=11 r=11 line=127"
 // Fields:
 //   n   name (header: title, drawn in yellow)
 //   ip  second text line
@@ -135,8 +135,9 @@ static const int16_t CARD_X = 1, CARD_W = 150, CARD_R = 3;
 static const int16_t INDICATOR_Y = 148, INDICATOR_H = 2;
 
 // one field's box: x absolute, y relative to the slot top, row height 8 * scale (the built-in 6x8
-// font and the icons are drawn at that integer scale; text that doesn't fit drops to a smaller one)
-struct Cell { int16_t x, y, w; uint8_t scale; };
+// font and the icons are drawn at that integer scale; text that doesn't fit drops to a smaller one,
+// or with ellipsis stays at scale and is cut short with "...")
+struct Cell { int16_t x, y, w; uint8_t scale; bool ellipsis; };
 enum : uint8_t { F_NAME, F_IP, F_DISK, F_RAM, F_COUNT }; // also the bit index of their stale section
 struct SlotLayout { int16_t slotH, h; Cell cells[F_COUNT]; int16_t barY, barH; };
 
@@ -145,8 +146,9 @@ static const SlotLayout HEADER_LAYOUT = { HEADER_H, HEADER_H, { {3, 3, 81, 1}, {
 static const SlotLayout CARD_LAYOUTS[MAX_PER_PAGE] = {
   // 1 per page, 117 px: one field per row, name at 3x, the rest at 2x
   { 120, 117, { {3, 6, 146, 3}, {3, 37, 146, 2}, {3, 60, 146, 2}, {3, 83, 146, 2} }, 106, 8 },
-  // 2 per page, 57 px: name and ip at 2x on their own rows, disk and ram side by side at 1x
-  { 60, 57, { {3, 3, 146, 2}, {3, 22, 146, 2}, {3, 41, 71, 1}, {77, 41, 72, 1} }, 51, 4 },
+  // 2 per page, 57 px: name and ip at 2x on their own rows (a long name stays 2x, cut with "..."),
+  // disk and ram side by side at 1x
+  { 60, 57, { {3, 3, 146, 2, true}, {3, 22, 146, 2}, {3, 41, 71, 1}, {77, 41, 72, 1} }, 51, 4 },
   // 3 per page, 37 px: too short for two 2x rows, so the 4-per-page grid with more spacing
   { 40, 37, { {3, 6, 81, 1}, {3, 19, 81, 1}, {85, 6, 64, 1}, {85, 19, 64, 1} }, 33, 2 },
   // 4 per page, 27 px: name / ip left, disk / ram right
@@ -193,7 +195,7 @@ static const uint8_t ITEM_COUNT = 12, SLOT_COUNT = MAX_PER_PAGE + 1; // 1..4 per
 
 struct Entry
 {
-  char name[16];
+  char name[25]; // 24 chars: what the 1 per page name row fits at 1x
   char ip[16];
   char disk[12];
   char ram[12];
@@ -547,6 +549,27 @@ static Rect drawFitText(int16_t x, int16_t y, int16_t w, uint8_t maxScale, const
   return { x, y, int16_t(end - x), int16_t(8 * sc) };
 }
 
+// text at scale, cut to the longest start that fits w with "..." when the whole text doesn't;
+// returns the drawn bounds
+static Rect drawEllipsisText(int16_t x, int16_t y, int16_t w, uint8_t scale, const char* s, uint16_t color)
+{
+  char buf[sizeof(Entry::name) + 3];
+  if (textWidth(s, scale) > w)
+  {
+    size_t n = strlen(s);
+    if (n > sizeof(Entry::name) - 1) n = sizeof(Entry::name) - 1;
+    do
+    {
+      n--;
+      memcpy(buf, s, n);
+      strcpy(buf + n, "...");
+    } while ((n > 0) && (textWidth(buf, scale) > w));
+    s = buf;
+  }
+  int16_t end = drawText(x, y, s, w, scale, color);
+  return { x, y, int16_t(end - x), int16_t(8 * scale) };
+}
+
 // value with the unit shortened step by step until it fits (" GB", "GB", "G"), at the largest
 // scale where any of those fits; the bare value only if none does
 static Rect drawValue(int16_t x, int16_t y, int16_t w, uint8_t maxScale, const char* v, uint16_t color)
@@ -595,7 +618,7 @@ static void drawRowContent(const Entry& e, int16_t y0, const SlotLayout& l, uint
     const Cell& c = l.cells[f];
     int16_t y = y0 + c.y;
     Rect r;
-    if (f == F_NAME) r = drawFitText(c.x, y, c.w, c.scale, e.name, titleColor);
+    if (f == F_NAME) r = c.ellipsis ? drawEllipsisText(c.x, y, c.w, c.scale, e.name, titleColor) : drawFitText(c.x, y, c.w, c.scale, e.name, titleColor);
     else if (f == F_IP) r = drawFitText(c.x, y, c.w, c.scale, e.ip, color);
     else
     {
