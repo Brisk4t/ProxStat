@@ -27,6 +27,10 @@ Usage:
   proxstat set redraw-interval <hours>  hours between full refreshes against ghosting, 0 = off
   proxstat set vid <hex>                USB vendor id of the display
   proxstat set pid <hex>                USB product id of the display
+  proxstat set header text-color <field> <color>
+  proxstat set list text-color <field> <color>
+  proxstat set list background-color <field> <color>
+                                        field: name, ip, disk or ram; color: black, white, yellow or red
 
 Settings are saved in %s.
 Without a running daemon, refresh, next and set talk to the display directly.
@@ -68,8 +72,8 @@ func run(args []string) error {
 		return runAction(cmd)
 	case cmd == "status" && len(args) == 1:
 		return runStatus()
-	case cmd == "set" && len(args) == 3:
-		return runSet(args[1], args[2])
+	case cmd == "set" && (len(args) == 3 || len(args) == 5):
+		return runSet(args[1:])
 	case cmd == "help" || cmd == "-h" || cmd == "--help":
 		printUsage()
 		return nil
@@ -101,14 +105,20 @@ func runAction(cmd string) error {
 	return report(msg, err)
 }
 
-// runSet saves one setting, then has the daemon apply it, or sends rotate and per-page to the
-// device directly when no daemon is running
-func runSet(key, value string) error {
+// runSet saves one setting ("<key> <value>" or "<scope> <kind> <field> <color>"), then has the
+// daemon apply it, or sends the display's settings to it directly when no daemon is running
+func runSet(args []string) error {
 	cfg, err := internal.LoadConfig()
 	if err != nil {
 		return err
 	}
-	if err := cfg.Set(key, value); err != nil {
+	key := args[0]
+	if len(args) == 2 {
+		err = cfg.Set(key, args[1])
+	} else {
+		err = cfg.SetColor(args[0], args[1], args[2], args[3])
+	}
+	if err != nil {
 		return err
 	}
 	if err := internal.SaveConfig(cfg); err != nil {
@@ -118,7 +128,7 @@ func runSet(key, value string) error {
 	if !errors.Is(err, internal.ErrNoDaemon) {
 		return report(msg, err)
 	}
-	if key != "rotate" && key != "per-page" {
+	if key != "rotate" && key != "per-page" && key != "header" && key != "list" {
 		fmt.Println("saved")
 		return nil
 	}
@@ -181,6 +191,9 @@ func runStatus() error {
 	fmt.Printf("update-interval  %d min\n", cfg.UpdateIntervalMinutes)
 	fmt.Printf("redraw-interval  %s\n", redraw)
 	fmt.Printf("vid:pid          %s:%s\n", cfg.VID, cfg.PID)
+	fmt.Printf("header text      %s\n", cfg.HeaderTextColor)
+	fmt.Printf("list text        %s\n", cfg.ListTextColor)
+	fmt.Printf("list background  %s\n", cfg.ListBackgroundColor)
 	if logFile, err := internal.LogPath(); err == nil {
 		fmt.Printf("log              %s\n", logFile)
 	}

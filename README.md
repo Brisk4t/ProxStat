@@ -1,6 +1,6 @@
 # ProxStat EPaper
 
-Shows a host and up to 12 containers or VMs on a 1.54" 152×152 4-color e-paper panel (black, white, yellow, red). Data arrives over USB serial. Only the parts of the screen that changed get redrawn.
+Shows a host and up to 12 containers or VMs on a 1.54" 152×152 4-color e-paper panel (black, white, yellow, red). Data arrives over USB serial from `proxstat`, a driver that runs on the Proxmox node (see [Usage](#usage)). Only the parts of the screen that changed get redrawn.
 
 - One header row (the host) and 1–4 list items per page (set with the `per_page=N` command; default 4, or `ITEMS_PER_PAGE`), up to 12 items. With fewer items per page, each card is taller.
 - A button steps to the next page and wraps around after the last one.
@@ -36,6 +36,117 @@ pio device monitor -d firmware -e stm32f103
 | LED (lit while refreshing) | PC13 | none | none |
 
 Pins are set per board in [firmware/platformio.ini](firmware/platformio.ini). On the Blue Pill, SCK and MOSI must be SPI1 pins. Keep clear of PA11/PA12 (USB), PA13/PA14 (SWD) and PB2 (BOOT1).
+
+## Usage
+
+The driver in [go/](go) reads the cluster through `pvesh` and keeps the display up to date. Run it on a Proxmox node, as root (`pvesh` needs root), with the display plugged into that node over USB.
+
+### Installing
+
+Building needs Go 1.27 or newer. From the repo root, on the node itself:
+
+```sh
+go -C go build -o proxstat .
+install -m 755 go/proxstat /usr/local/bin/proxstat
+```
+
+Or build on another machine and copy the binary over:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go -C go build -o proxstat .
+scp go/proxstat root@<node>:/usr/local/bin/proxstat
+```
+
+### Running
+
+```sh
+proxstat daemon      # start in the background
+proxstat status      # settings, whether the daemon runs and the display is connected
+proxstat stop        # stop it
+```
+
+The daemon reads Proxmox every update interval and sends only the values that changed, so an unchanged screen isn't redrawn. If the display is unplugged or resets, the daemon reconnects within 15 seconds and sends everything again, including rotation, items per page and colors, since the display doesn't keep them.
+
+Without a running daemon, `refresh`, `next` and `set` talk to the display directly, but nothing updates on its own.
+
+After replacing the binary, restart the daemon with `proxstat stop` and `proxstat daemon`. A running daemon keeps running the old code.
+
+### Driver commands
+
+| Command | Effect |
+|---|---|
+| `proxstat daemon` | Start the background service. Returns once it's listening, or prints why it couldn't start. |
+| `proxstat daemon --foreground` | Run the service in this terminal, e.g. under systemd. |
+| `proxstat stop` | Stop the background service. |
+| `proxstat refresh` | Read Proxmox and send the changes now. |
+| `proxstat next` | Show the next page, same as pressing the button. |
+| `proxstat status` | Show the settings, the config and log locations, and the daemon's state: connected port, last update, last error. |
+| `proxstat set <setting> <value>` | Change a setting (see below). It's saved, and applied right away. |
+
+### Settings
+
+| Setting | Values | Default | Meaning |
+|---|---|---|---|
+| `rotate` | `-1`–`3` | `0` | Rotation in 90° steps clockwise. `-1` is the same as `3`. |
+| `per-page` | `1`–`4` | `4` | List items per page (see [Card sizes](#card-sizes)). |
+| `update-interval` | minutes, at least 1 | `10` | How often Proxmox is read. |
+| `redraw-interval` | hours, fractions allowed | `12` | How often the daemon runs a full refresh against ghosting. `0` turns it off. The firmware also runs its own every `FULL_REFRESH_HOURS`. |
+| `vid` | 4 hex digits | `B00B` | USB vendor id of the display. |
+| `pid` | 4 hex digits | `6969` | USB product id of the display. |
+
+### Colors
+
+Each text field (`name`, `ip`, `disk`, `ram`) can have its own color, one of `black`, `white`, `yellow` or `red`:
+
+| Command | Default | Meaning |
+|---|---|---|
+| `proxstat set header text-color <field> <color>` | `name` yellow, the rest white | Text color in the header. |
+| `proxstat set list text-color <field> <color>` | black | Text color on the list items. |
+| `proxstat set list background-color <field> <color>` | white | Background behind a field on the list items. A field in the left or right column colors its half of the card, split at the gap between the columns; a field with a row to itself colors the full width. The rows split halfway between them, and the top and bottom rows run to the card's edges. |
+
+The disk and RAM icons take their field's text color. The bar keeps its threshold colors (see `BAR_WARN_PCT` / `BAR_CRIT_PCT`), drawn over the bottom row's background. Offline items ignore the list colors and keep the default black on white with black diagonals.
+
+```sh
+proxstat set list background-color name red
+proxstat set list text-color name white
+proxstat set header text-color name white
+```
+
+For example:
+
+```sh
+proxstat set per-page 2
+proxstat set rotate 1
+proxstat set update-interval 5
+```
+
+Settings are saved in `config.json` in the user's config directory, which is `/root/.config/proxstat/` when run as root. The daemon logs to `daemon.log` in the user's cache directory (`/root/.cache/proxstat/`), and the log is never rotated.
+
+### What's shown
+
+- The header is the node the driver runs on: its name, IP, disk and RAM use, and CPU as the bar. In a cluster where the node isn't found by hostname, it's the first node.
+- The list holds up to 12 VMs and containers: running ones first, then the rest grouped by status, each group sorted by name. With more than 12, the last ones in that order are left out. A guest that starts or stops moves in the list.
+- Each item shows its name, IP (running guests only; QEMU VMs need the guest agent), disk and RAM in GiB, and CPU as the bar. Guests that aren't running are drawn offline.
+
+### Starting at boot
+
+Run the daemon in the foreground under systemd, which keeps it in the background itself. Save this as `/etc/systemd/system/proxstat.service`:
+
+```ini
+[Unit]
+Description=ProxStat e-paper display
+After=pve-cluster.service
+
+[Service]
+ExecStart=/usr/local/bin/proxstat daemon --foreground
+User=root
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable it with `systemctl enable --now proxstat`. Its log goes to the journal: `journalctl -u proxstat`.
 
 ## Build flags
 
@@ -84,7 +195,7 @@ Every non-empty line gets exactly one reply, in the order the lines were sent:
 | `ERR <reason>` | The line was rejected, or one of its fields was. Good fields on the same line are still applied, and the reply gives the first error. |
 | `VER ...` | The reply to `ver` (see [Commands](#commands)). |
 
-Reasons: `unknown command`, `unknown field`, `field without '='`, `item must be H or 1..12`, `no such page`, `rotation must be -1..3`, `per_page must be 1..4`, `line too long`.
+Reasons: `unknown command`, `unknown field`, `field without '='`, `item must be H or 1..12`, `no such page`, `rotation must be -1..3`, `per_page must be 1..4`, `expected <field>,<color>`, `unknown color`, `line too long`.
 
 With `EPD_DEBUG` on, debug lines are mixed in with the replies. Debug lines never start with `OK`, `ERR ` or `VER `, so a host can skip anything else. Because the replies are in order, the host can match them to lines by counting, without sequence numbers.
 
@@ -120,6 +231,9 @@ Each field redraws only its own section of the screen. Changing `on`, or setting
 | `rot=1` | Rotate the drawing: `0`, `1`, `2`, `3`, or `-1` (same as `3`), in 90° steps clockwise. Triggers a full refresh. Not saved: after a reset, `EPD_ROTATION` applies again. |
 | `per_page=2` | Show 1–4 list items per page. Item numbers don't change: with 2 per page, items `1`–`2` are page 1, `3`–`4` page 2 and so on. The display stays on the page that holds the first item shown before the change. Triggers a full refresh. Not saved: after a reset, `ITEMS_PER_PAGE` applies again. |
 | `full` | Run a full refresh now. |
+| `hfg=n,white` | Header text color of one field: `n`, `ip`, `d` or `r`, and `black`, `white`, `yellow` or `red`. The disk and RAM icons take their field's color. Redraws the header. |
+| `lfg=ip,yellow` | List text color of one field, same values. Offline items ignore it. Redraws the cards. |
+| `lbg=d,red` | List background of one field, same values, covering that field's part of the card (see [Colors](#colors)). Offline items ignore it. Redraws the cards. Colors aren't saved: after a reset, the defaults apply again. |
 | `ver` | Reply with the protocol version and limits, e.g. `VER 1 items=12 per_page=4 n=24 ip=15 d=11 r=11 line=127`: the item count, the current items per page, maximum length of each field, and maximum line length. The version goes up whenever the protocol changes in a way that isn't backward compatible. |
 
 ### Example

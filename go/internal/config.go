@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,46 @@ type Config struct {
 	RedrawIntervalHours   float64 `json:"redraw_interval_hours"`   // full refresh against ghosting, 0 = off
 	VID                   string  `json:"vid"`                     // USB vendor id, 4 hex digits
 	PID                   string  `json:"pid"`                     // USB product id, 4 hex digits
+
+	HeaderTextColor     FieldColors `json:"header_text_color"`
+	ListTextColor       FieldColors `json:"list_text_color"` // offline items keep the default look
+	ListBackgroundColor FieldColors `json:"list_background_color"`
+}
+
+// FieldColors is one panel color per text field; disk and ram color their icons too
+type FieldColors struct {
+	Name string `json:"name"`
+	IP   string `json:"ip"`
+	Disk string `json:"disk"`
+	RAM  string `json:"ram"`
+}
+
+// The colors the panel can show
+var panelColors = []string{"black", "white", "yellow", "red"}
+
+// field returns the color of the CLI field name, nil for an unknown field
+func (f *FieldColors) field(name string) *string {
+	switch name {
+	case "name":
+		return &f.Name
+	case "ip":
+		return &f.IP
+	case "disk":
+		return &f.Disk
+	case "ram":
+		return &f.RAM
+	}
+	return nil
+}
+
+// values returns the colors in firmware field order: name, ip, disk, ram
+func (f FieldColors) values() [4]string {
+	return [4]string{f.Name, f.IP, f.Disk, f.RAM}
+}
+
+// String lists the colors as "name=yellow ip=white disk=white ram=white"
+func (f FieldColors) String() string {
+	return fmt.Sprintf("name=%s ip=%s disk=%s ram=%s", f.Name, f.IP, f.Disk, f.RAM)
 }
 
 // defaultConfig returns the settings used when the config file is missing or leaves a key out
@@ -33,6 +74,9 @@ func defaultConfig() Config {
 		RedrawIntervalHours:   12,
 		VID:                   "B00B",
 		PID:                   "6969",
+		HeaderTextColor:       FieldColors{Name: "yellow", IP: "white", Disk: "white", RAM: "white"},
+		ListTextColor:         FieldColors{Name: "black", IP: "black", Disk: "black", RAM: "black"},
+		ListBackgroundColor:   FieldColors{Name: "white", IP: "white", Disk: "white", RAM: "white"},
 	}
 }
 
@@ -58,6 +102,21 @@ func (c Config) validate() error {
 	if !hexID.MatchString(c.PID) {
 		return errors.New("pid must be 4 hex digits")
 	}
+	for _, set := range []struct {
+		name   string
+		colors FieldColors
+	}{
+		{"header text-color", c.HeaderTextColor},
+		{"list text-color", c.ListTextColor},
+		{"list background-color", c.ListBackgroundColor},
+	} {
+		for i, color := range set.colors.values() {
+			if !slices.Contains(panelColors, color) {
+				field := [4]string{"name", "ip", "disk", "ram"}[i]
+				return fmt.Errorf("%s %s: %q is not one of %s", set.name, field, color, strings.Join(panelColors, ", "))
+			}
+		}
+	}
 	return nil
 }
 
@@ -69,6 +128,32 @@ func (c Config) updateInterval() time.Duration {
 // redrawInterval is the time between full refreshes, 0 when they are off
 func (c Config) redrawInterval() time.Duration {
 	return time.Duration(c.RedrawIntervalHours * float64(time.Hour))
+}
+
+// SetColor stores one field's color: scope header or list, kind text-color or background-color
+// (list only), field name, ip, disk or ram
+func (c *Config) SetColor(scope, kind, field, color string) error {
+	var colors *FieldColors
+	switch {
+	case scope == "header" && kind == "text-color":
+		colors = &c.HeaderTextColor
+	case scope == "list" && kind == "text-color":
+		colors = &c.ListTextColor
+	case scope == "list" && kind == "background-color":
+		colors = &c.ListBackgroundColor
+	case scope == "header" && kind == "background-color":
+		return errors.New("the header has no background-color, only text-color")
+	case scope != "header" && scope != "list":
+		return fmt.Errorf("unknown setting %q, expected header or list", scope)
+	default:
+		return fmt.Errorf("unknown %s setting %q, expected text-color or background-color", scope, kind)
+	}
+	target := colors.field(field)
+	if target == nil {
+		return fmt.Errorf("unknown field %q, expected name, ip, disk or ram", field)
+	}
+	*target = strings.ToLower(color)
+	return c.validate()
 }
 
 // Set parses value for the CLI key and stores it

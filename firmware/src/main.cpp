@@ -18,6 +18,11 @@
 //   per_page=2              cards per page, 1..4; full refresh, keeps the first shown item on screen.
 //                           Not saved, ITEMS_PER_PAGE applies again after a reset
 //   full                   full refresh now
+//   hfg=n,red               header text color of one field (n, ip, d, r): black, white, yellow or red
+//   lfg=ip,yellow           list text color of one field, also the disk / ram icon; offline cards ignore it
+//   lbg=d,red               list background of one field: its column (or the whole width when the field
+//                           has the row to itself) and its row, running to the card's edges; offline
+//                           cards ignore it. Not saved, all three reset to the defaults after a reset
 //   ver                     protocol version and limits:
 //                           "VER 1 items=12 per_page=4 n=24 ip=15 d=11 r=11 line=127"
 // Fields:
@@ -215,12 +220,27 @@ static uint32_t g_staleSince;
 static uint32_t g_lastFull;
 static uint8_t g_rotation = ((EPD_ROTATION % 4) + 4) % 4; // -1 -> 3
 
+// per-field colors, indexed by F_NAME..F_RAM ("hfg=", "lfg=", "lbg=")
+struct Colors
+{
+  uint16_t headerFg[F_COUNT];
+  uint16_t listFg[F_COUNT];
+  uint16_t listBg[F_COUNT];
+};
+static const Colors DEFAULT_COLORS = {
+  { GxEPD_YELLOW, GxEPD_WHITE, GxEPD_WHITE, GxEPD_WHITE },
+  { GxEPD_BLACK, GxEPD_BLACK, GxEPD_BLACK, GxEPD_BLACK },
+  { GxEPD_WHITE, GxEPD_WHITE, GxEPD_WHITE, GxEPD_WHITE },
+};
+static Colors g_colors = DEFAULT_COLORS;
+
 // snapshot drawn by the page loop; serial updates during busy waits only touch the live model
 struct Scene
 {
   Entry header;
   Entry items[MAX_PER_PAGE];
   uint8_t page, pages, perPage;
+  Colors colors;
 };
 static Scene g_scene;
 
@@ -381,6 +401,46 @@ static const char* applyEntry(int8_t idx, char* fields)
   return err;
 }
 
+// F_NAME..F_RAM for a field key ("n", "ip", "d", "r"), -1 if unknown
+static int8_t fieldIndex(const char* key)
+{
+  static const char* const KEYS[F_COUNT] = { "n", "ip", "d", "r" };
+  for (uint8_t f = 0; f < F_COUNT; f++)
+  {
+    if (strcmp(key, KEYS[f]) == 0) return f;
+  }
+  return -1;
+}
+
+// panel color for its name, -1 if unknown
+static int32_t colorByName(const char* name)
+{
+  if (strcmp(name, "black") == 0) return GxEPD_BLACK;
+  if (strcmp(name, "white") == 0) return GxEPD_WHITE;
+  if (strcmp(name, "yellow") == 0) return GxEPD_YELLOW;
+  if (strcmp(name, "red") == 0) return GxEPD_RED;
+  return -1;
+}
+
+// "hfg=", "lfg=" or "lbg=" followed by "<field>,<color>"; redraws the header or the cards on a change
+static const char* applyColor(char* line)
+{
+  bool header = line[0] == 'h';
+  uint16_t* colors = header ? g_colors.headerFg : (line[1] == 'b') ? g_colors.listBg : g_colors.listFg;
+  char* comma = strchr(line + 4, ',');
+  if (!comma) return "expected <field>,<color>";
+  *comma = 0;
+  int8_t f = fieldIndex(line + 4);
+  if (f < 0) return "unknown field";
+  int32_t c = colorByName(comma + 1);
+  if (c < 0) return "unknown color";
+  if (colors[f] == uint16_t(c)) return nullptr;
+  colors[f] = uint16_t(c);
+  if (header) markStale(0, SEC_CARD);
+  else for (uint8_t s = 1; s <= g_perPage; s++) markStale(s, SEC_CARD);
+  return nullptr;
+}
+
 // returns the error, nullptr on success
 static const char* execLine(char* line)
 {
@@ -410,6 +470,8 @@ static const char* execLine(char* line)
       g_fullPending = true;
     }
   }
+  else if ((strncmp(line, "hfg=", 4) == 0) || (strncmp(line, "lfg=", 4) == 0) || (strncmp(line, "lbg=", 4) == 0))
+    return applyColor(line);
   else if (strncmp(line, "per_page=", 9) == 0)
   {
     int n = atoi(line + 9);
@@ -610,21 +672,22 @@ static uint16_t barColor(uint8_t pct, uint16_t low)
   return pct >= BAR_CRIT_PCT ? GxEPD_RED : pct >= BAR_WARN_PCT ? GxEPD_YELLOW : low;
 }
 
-// drawn (optional) receives the bounds of name, ip, disk icon + value and ram icon + value
-static void drawRowContent(const Entry& e, int16_t y0, const SlotLayout& l, uint16_t titleColor, uint16_t color, Rect* drawn = nullptr)
+// drawn (optional) receives the bounds of name, ip, disk icon + value and ram icon + value;
+// fg holds each field's color, also used for the disk and ram icons
+static void drawRowContent(const Entry& e, int16_t y0, const SlotLayout& l, const uint16_t* fg, Rect* drawn = nullptr)
 {
   for (uint8_t f = 0; f < F_COUNT; f++)
   {
     const Cell& c = l.cells[f];
     int16_t y = y0 + c.y;
     Rect r;
-    if (f == F_NAME) r = c.ellipsis ? drawEllipsisText(c.x, y, c.w, c.scale, e.name, titleColor) : drawFitText(c.x, y, c.w, c.scale, e.name, titleColor);
-    else if (f == F_IP) r = drawFitText(c.x, y, c.w, c.scale, e.ip, color);
+    if (f == F_NAME) r = c.ellipsis ? drawEllipsisText(c.x, y, c.w, c.scale, e.name, fg[f]) : drawFitText(c.x, y, c.w, c.scale, e.name, fg[f]);
+    else if (f == F_IP) r = drawFitText(c.x, y, c.w, c.scale, e.ip, fg[f]);
     else
     {
-      drawIcon(f == F_DISK ? DISK_ICON : RAM_ICON, c.x, y, c.scale, color);
+      drawIcon(f == F_DISK ? DISK_ICON : RAM_ICON, c.x, y, c.scale, fg[f]);
       int16_t vx = c.x + ICON_ADVANCE * c.scale;
-      Rect v = drawValue(vx, y, c.w - ICON_ADVANCE * c.scale, c.scale, f == F_DISK ? e.disk : e.ram, color);
+      Rect v = drawValue(vx, y, c.w - ICON_ADVANCE * c.scale, c.scale, f == F_DISK ? e.disk : e.ram, fg[f]);
       r = { c.x, y, int16_t(v.x + v.w - c.x), int16_t(9 * c.scale) };
     }
     if (drawn) drawn[f] = r;
@@ -642,21 +705,91 @@ static bool onContent(int16_t x, int16_t y, const Rect* drawn)
   return false;
 }
 
-static void drawHeader(const Entry& e)
+static void drawHeader(const Entry& e, const Colors& colors)
 {
-  drawRowContent(e, 0, HEADER_LAYOUT, GxEPD_YELLOW, GxEPD_WHITE);
+  drawRowContent(e, 0, HEADER_LAYOUT, colors.headerFg);
   int16_t w = int32_t(SCREEN_W) * e.bar / 100;
   if (w > 0) display.fillRect(0, HEADER_LAYOUT.barY, w, HEADER_LAYOUT.barH, barColor(e.bar, GxEPD_WHITE));
 }
 
-static void drawCard(uint8_t i, const Entry& e)
+// bottom of the row at y: text is 8 rows per scale step, the disk / ram icons 9
+static int16_t rowBottom(const SlotLayout& l, int16_t y)
+{
+  int16_t bottom = y;
+  for (uint8_t f = 0; f < F_COUNT; f++)
+  {
+    const Cell& c = l.cells[f];
+    if (c.y == y) bottom = max(bottom, int16_t(c.y + ((f >= F_DISK) ? 9 : 8) * c.scale));
+  }
+  return bottom;
+}
+
+// the part of a card behind field f, y relative to the slot top: the card's whole width when the
+// field has the row to itself, else its side of the gap between the two columns; rows split halfway
+// between them, the first and last running to the card's top and bottom edges
+static Rect fieldBand(const SlotLayout& l, uint8_t f)
+{
+  const Cell& c = l.cells[f];
+  int16_t x0 = CARD_X, x1 = CARD_X + CARD_W, y0 = 0, y1 = l.h;
+  for (uint8_t o = 0; o < F_COUNT; o++)
+  {
+    const Cell& n = l.cells[o];
+    if (o == f) continue;
+    if (n.y == c.y)
+    {
+      if (n.x > c.x) x1 = (c.x + c.w + n.x + 1) / 2;
+      else x0 = (n.x + n.w + c.x + 1) / 2;
+    }
+    else if (n.y < c.y) y0 = max(y0, int16_t((rowBottom(l, n.y) + c.y + 1) / 2));
+    else y1 = min(y1, int16_t((rowBottom(l, c.y) + n.y + 1) / 2));
+  }
+  return { x0, y0, int16_t(x1 - x0), int16_t(y1 - y0) };
+}
+
+// field whose band holds (x, y), y relative to the slot top
+static uint8_t bandAt(const SlotLayout& l, int16_t x, int16_t y)
+{
+  for (uint8_t f = 0; f < F_COUNT; f++)
+  {
+    Rect b = fieldBand(l, f);
+    if ((x >= b.x) && (x < b.x + b.w) && (y >= b.y) && (y < b.y + b.h)) return f;
+  }
+  return F_NAME;
+}
+
+// card background from the fields' bands. The bands are plain rects, so each corner is cleared and
+// redrawn as a small round rect in its band's color, which has the same corner as the full card
+static void drawCardBackground(int16_t y0, const SlotLayout& l, const uint16_t* bg)
+{
+  for (uint8_t f = 0; f < F_COUNT; f++)
+  {
+    Rect b = fieldBand(l, f);
+    display.fillRect(b.x, y0 + b.y, b.w, b.h, bg[f]);
+  }
+  const int16_t d = 2 * CARD_R;
+  for (uint8_t corner = 0; corner < 4; corner++)
+  {
+    bool right = corner & 1, bottom = corner & 2;
+    int16_t qx = right ? CARD_X + CARD_W - CARD_R : CARD_X, qy = bottom ? l.h - CARD_R : 0;
+    int16_t rx = right ? CARD_X + CARD_W - d : CARD_X, ry = bottom ? l.h - d : 0;
+    uint16_t c = bg[bandAt(l, right ? CARD_X + CARD_W - 1 : CARD_X, bottom ? l.h - 1 : 0)];
+    display.fillRect(qx, y0 + qy, CARD_R, CARD_R, GxEPD_BLACK);
+    display.fillRoundRect(rx, y0 + ry, d, d, CARD_R, c);
+  }
+}
+
+// offline cards keep the default look whatever the list colors are
+static const uint16_t OFFLINE_FG[F_COUNT] = { GxEPD_BLACK, GxEPD_BLACK, GxEPD_BLACK, GxEPD_BLACK };
+
+static void drawCard(uint8_t i, const Entry& e, const Colors& colors)
 {
   if (!e.used) return;
   int16_t y0 = slotY(i + 1);
   const SlotLayout& l = *g_card;
-  display.fillRoundRect(CARD_X, y0, CARD_W, l.h, CARD_R, GxEPD_WHITE);
+  if (e.online) drawCardBackground(y0, l, colors.listBg);
+  else display.fillRoundRect(CARD_X, y0, CARD_W, l.h, CARD_R, GxEPD_WHITE);
   Rect drawn[F_COUNT];
-  drawRowContent(e, y0, l, GxEPD_BLACK, GxEPD_BLACK, drawn);
+  drawRowContent(e, y0, l, e.online ? colors.listFg : OFFLINE_FG, drawn);
   if (!e.online)
   {
     // offline: evenly spaced solid diagonals ('/', 2 px thick, 6 px apart), broken around text and icons
@@ -690,8 +823,8 @@ static void drawPageIndicator(uint8_t page, uint8_t pages)
 static void drawScene()
 {
   display.fillScreen(GxEPD_BLACK);
-  drawHeader(g_scene.header);
-  for (uint8_t i = 0; i < g_scene.perPage; i++) drawCard(i, g_scene.items[i]);
+  drawHeader(g_scene.header, g_scene.colors);
+  for (uint8_t i = 0; i < g_scene.perPage; i++) drawCard(i, g_scene.items[i], g_scene.colors);
   drawPageIndicator(g_scene.page, g_scene.pages);
 }
 
@@ -711,6 +844,7 @@ static void render(bool full)
   for (uint8_t i = 0; i < g_perPage; i++) g_scene.items[i] = g_items[g_page * g_perPage + i];
   g_scene.page = g_page;
   g_scene.pages = pageCount();
+  g_scene.colors = g_colors;
   g_card = &CARD_LAYOUTS[g_perPage - 1];
 
   // bounding box of everything stale, one partial refresh per pass

@@ -16,9 +16,17 @@ const (
 	maxIPLen   = 15
 )
 
+// The color commands, in the order of settings.colors, and the firmware's field keys, in the order
+// of FieldColors.values
+var (
+	colorCommands = [3]string{"hfg", "lfg", "lbg"}
+	colorFields   = [4]string{"n", "ip", "d", "r"}
+)
+
 // settings are the ones the device forgets on reset
 type settings struct {
 	rotation, perPage int
+	colors            [3][4]string // header text, list text, list background; each by field
 }
 
 // entry is one header or list item as the display shows it, already formatted for the wire, so
@@ -39,7 +47,11 @@ type rows struct {
 
 // settingsOf returns the settings for cfg
 func settingsOf(cfg Config) settings {
-	return settings{rotation: cfg.Rotation, perPage: cfg.PerPage}
+	return settings{
+		rotation: cfg.Rotation,
+		perPage:  cfg.PerPage,
+		colors:   [3][4]string{cfg.HeaderTextColor.values(), cfg.ListTextColor.values(), cfg.ListBackgroundColor.values()},
+	}
 }
 
 // diffSettings returns a command for every setting that differs from prev. A nil prev means the
@@ -51,6 +63,13 @@ func diffSettings(prev *settings, next settings) []string {
 	}
 	if prev == nil || prev.perPage != next.perPage {
 		lines = append(lines, "per_page="+strconv.Itoa(next.perPage))
+	}
+	for i, cmd := range colorCommands {
+		for j, key := range colorFields {
+			if prev == nil || prev.colors[i][j] != next.colors[i][j] {
+				lines = append(lines, cmd+"="+key+","+next.colors[i][j])
+			}
+		}
 	}
 	return lines
 }
