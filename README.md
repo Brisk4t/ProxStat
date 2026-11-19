@@ -1,5 +1,7 @@
 # ProxStat EPaper
 
+![Proxstat](proxstat.jpg)
+
 Shows a Proxmox host and up to 12 of its containers or VMs on a 1.54" 152×152 4-color e-paper panel (black, white, yellow, red). The project has two parts:
 
 - **Firmware** for the board driving the panel, in [firmware/](firmware). It takes the data over USB serial and redraws only the parts of the screen that changed.
